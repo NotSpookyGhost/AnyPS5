@@ -393,7 +393,10 @@ void DefineDescriptors(SpirvEmitterState& state) {
             return variable;
         };
         const auto ArrayType = [&](std::uint32_t type) {
-            return state.module.Type(spv::OpTypeArray, type, ConstantU32(state, static_cast<std::uint32_t>(binding.resources.size())));
+            const bool heap = binding.kind == DescriptorBindingKind::Samplers || ImageBindingResourceClass(binding.kind) != ImageResourceClass::None;
+            const auto count = heap ? RuntimeAbi::HeapCapacity(binding.kind) : static_cast<std::uint32_t>(binding.resources.size());
+            if (binding.resources.size() > count) FailEmit("typed descriptor heap capacity exceeded");
+            return state.module.Type(spv::OpTypeArray, type, ConstantU32(state, count));
         };
         switch (binding.kind) {
         case DescriptorBindingKind::Buffers:

@@ -1071,7 +1071,8 @@ AgcDriver::Graphics::Context mockContext() {
     context.memory.memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     context.limits.minStorageBufferOffsetAlignment = 1;
     context.limits.maxBoundDescriptorSets = 1;
-    context.limits.maxStorageBufferRange = 4096;
+    context.limits.maxStorageBufferRange = 16384;
+    context.nullDescriptors = true;
     context.limits.maxPerStageDescriptorStorageBuffers = 16;
     context.limits.maxPerStageResources = 128;
     context.limits.maxDescriptorSetStorageBuffers = 32;
@@ -1104,6 +1105,13 @@ ShaderRecompiler::DescriptorBinding makeBinding(Role role, std::uint32_t binding
     result.count = count;
     result.guestDescriptor = std::move(words);
     return result;
+}
+
+std::vector<std::uint32_t> ShaderDataWords(std::initializer_list<std::uint32_t> userData) {
+    std::vector<std::uint32_t> words(ShaderRecompiler::RuntimeAbi::ShaderDataDwords);
+    words[0] = ShaderRecompiler::RuntimeAbi::Version;
+    std::copy(userData.begin(), userData.end(), words.begin() + ShaderRecompiler::RuntimeAbi::UserDataDword);
+    return words;
 }
 
 bool sameBytes(const std::vector<std::byte>& memory, const void* expected, std::size_t bytes) {
@@ -1189,7 +1197,7 @@ void resourceTests() {
         ShaderRecompiler::RecompileResult vertex;
         ShaderRecompiler::RecompileResult fragment;
         vertex.bindings.push_back(makeBinding(Role::GuestBuffers, 0, 2, join(vsharp(guestFirst.data(), 16), vsharp(guestSecond.data(), 32))));
-        vertex.bindings.push_back(makeBinding(Role::ShaderData, 5, 1, {7, 8, 9}));
+        vertex.bindings.push_back(makeBinding(Role::ShaderData, 5, 1, ShaderDataWords({7, 8, 9})));
         fragment.bindings.push_back(makeBinding(Role::FlattenedSrt, 43, 1, {1, 2}));
         fragment.bindings.push_back(makeBinding(Role::GuestBuffers, 44, 1, vsharp(guestThird.data(), 8)));
         AgcDriver::Graphics::ShaderResources resources(context, vertex, fragment, state.color, 0, 0);
@@ -1204,8 +1212,8 @@ void resourceTests() {
         Require(array.count == 2 && array.buffers.size() == 2 && array.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, "guest buffer array write is incorrect");
         Require(array.buffers[0].offset == 0 && array.buffers[0].range == 16 && array.buffers[1].offset == 0 && array.buffers[1].range == 32, "guest buffers must be bound at zero offset with their descriptor size");
         Require(sameBytes(bufferBytes(array.buffers[0].buffer), guestFirst.data(), 16) && sameBytes(bufferBytes(array.buffers[1].buffer), guestSecond.data(), 32), "guest buffer contents were not uploaded");
-        const std::array<std::uint32_t, 3> data{7, 8, 9};
-        Require(findWrite(5).buffers.size() == 1 && findWrite(5).buffers[0].range == 12 && sameBytes(bufferBytes(findWrite(5).buffers[0].buffer), data.data(), 12), "shader data buffer is incorrect");
+        const auto data = ShaderDataWords({7, 8, 9});
+        Require(findWrite(5).buffers.size() == 1 && findWrite(5).buffers[0].range == data.size() * 4u && sameBytes(bufferBytes(findWrite(5).buffers[0].buffer), data.data(), data.size() * 4u), "shader data buffer is incorrect");
         const std::array<std::uint32_t, 2> srt{1, 2};
         Require(findWrite(43).buffers.size() == 1 && findWrite(43).buffers[0].range == 8 && sameBytes(bufferBytes(findWrite(43).buffers[0].buffer), srt.data(), 8), "flattened SRT buffer is incorrect");
         Require(findWrite(44).buffers.size() == 1 && findWrite(44).buffers[0].range == 8 && sameBytes(bufferBytes(findWrite(44).buffers[0].buffer), guestThird.data(), 8), "fragment guest buffer is incorrect");
@@ -1278,9 +1286,10 @@ void resourceTests() {
         mutate(binding);
         return binding;
     };
-    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::SampledImage; }), "guest texture descriptor must contain 8 dwords");
-    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::StorageImage; }), "guest storage image descriptors must contain 8 dwords");
-    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestSamplers; binding.kind = Kind::Sampler; }), "shader sampler descriptors exceed per-stage limits");
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::SampledImage; binding.binding = 1u; }), "guest texture descriptor must contain 8 dwords");
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::StorageImage; binding.binding = 29u; }), "guest storage image descriptors must contain 8 dwords");
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestSamplers; binding.kind = Kind::Sampler; binding.binding = 44u; }), "shader sampler descriptors exceed per-stage limits");
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::SampledImage; binding.binding = 29u; }), "resource class disagrees");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::Gds; }), "invalid GDS descriptor contract");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::BdaPagetable; binding.guestDescriptor.clear(); }), "BDA table and fault descriptors");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::FaultBuffer; binding.guestDescriptor.clear(); }), "BDA table and fault descriptors");
@@ -1294,11 +1303,13 @@ void resourceTests() {
     expectSingleFailure(changed([](auto& binding) { binding.count = 2; }), "four DWORDs per array element");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; binding.count = 2; binding.guestDescriptor = {1, 2}; }), "must not be arrays");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; binding.guestDescriptor.clear(); }), "empty shader data descriptor");
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; }), "fixed runtime ABI");
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; binding.guestDescriptor = ShaderDataWords({}); binding.guestDescriptor[0] = 0u; }), "incompatible version");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::FlattenedSrt; binding.guestDescriptor.clear(); }), "empty shader data descriptor");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x40000000u; }), "reserved bits");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[3] |= 0x40000000u; }), "unsupported type");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x3fffu << 16u; binding.guestDescriptor[2] = 0xffffffffu; }), "descriptor range limit");
-    expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[2] = 8192; }), "descriptor range limit");
+    expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[2] = 32768; }), "descriptor range limit");
     expectSingleAccepted(changed([](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(0x1000), 8); }), "an unmapped V#");
     expectSingleFailure(changed([&](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(state.color.address), 64); }), "aliases the render target");
     expectSingleAccepted(changed([](auto& binding) { binding.count = 3; binding.guestDescriptor = join(join(vsharp(guestFirst.data(), 16), vsharp(guestSecond.data(), 32)), vsharp(reinterpret_cast<const void*>(0x1000), 8)); }), "an unmapped V# element");
@@ -1345,21 +1356,23 @@ void misalignedShaderDataTests() {
     {
         ShaderRecompiler::RecompileResult compute;
         compute.bindings.push_back(makeBinding(Role::GuestBuffers, 0, 2, join(vsharp(guest.data(), 32), vsharp(guest.data() + 1, 8))));
-        compute.bindings.push_back(makeBinding(Role::ShaderData, 1, 1, {0x11, 0x22, 0}));
-        compute.memoryOffsetDword = 2;
+        compute.bindings.push_back(makeBinding(Role::ShaderData, 1, 1, ShaderDataWords({0x11, 0x22})));
+        compute.memoryOffsetDword = ShaderRecompiler::RuntimeAbi::BufferOffsetsDword;
         auto live = compute;
-        live.bindings[1].guestDescriptor = {0x33, 0x44, 0};
+        live.bindings[1].guestDescriptor = ShaderDataWords({0x33, 0x44});
         const AgcDriver::Graphics::CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &compute, 0};
         const AgcDriver::Graphics::CompiledShader liveShader{ShaderRecompiler::ShaderStage::Compute, &live, 0};
         AgcDriver::Graphics::ShaderResources resources(context, shader);
         const auto& views = findWrite(0);
         Require(views.buffers.size() == 2 && views.buffers[0].range == 32 && views.buffers[1].range == 12 && views.buffers[1].offset == views.buffers[0].offset, "the misaligned view is not bound from the aligned offset below it");
         const auto data = findWrite(1).buffers.at(0).buffer;
-        const std::array<std::uint32_t, 3> patched{0x11, 0x22, 0x400};
-        Require(sameBytes(bufferBytes(data), patched.data(), sizeof(patched)), "the shader data buffer does not hold the misaligned view's offset");
+        auto patched = ShaderDataWords({0x11, 0x22});
+        patched[ShaderRecompiler::RuntimeAbi::BufferOffsetsDword] = 0x400u;
+        Require(sameBytes(bufferBytes(data), patched.data(), patched.size() * 4u), "the shader data buffer does not hold the misaligned view's offset");
         Require(resources.RefreshData(commands, liveShader), "a refresh with different words recorded nothing");
-        const std::array<std::uint32_t, 3> refreshed{0x33, 0x44, 0x400};
-        Require(sameBytes(bufferBytes(data), refreshed.data(), sizeof(refreshed)), "a data refresh dropped the misaligned view's offset");
+        auto refreshed = ShaderDataWords({0x33, 0x44});
+        refreshed[ShaderRecompiler::RuntimeAbi::BufferOffsetsDword] = 0x400u;
+        Require(sameBytes(bufferBytes(data), refreshed.data(), refreshed.size() * 4u), "a data refresh dropped the misaligned view's offset");
         Require(!resources.DataWordsDiffer(liveShader) && resources.DataWordsHash() == AgcDriver::Graphics::ShaderResources::DataWordsHash(liveShader), "the refreshed template's words are not the dispatch's");
     }
     Require(mock.live == 0, "misaligned shader data resources leaked Vulkan objects");

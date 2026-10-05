@@ -21,7 +21,7 @@ bool UserDataDwordIndex(const SpirvEmitterState& state, ScalarReg reg, std::uint
     if (found == registers.end() || *found != registerIndex) {
         return false;
     }
-    dwordIndex = static_cast<std::uint32_t>(found - registers.begin());
+    dwordIndex = RuntimeAbi::UserDataDword + registerIndex;
     return true;
 }
 

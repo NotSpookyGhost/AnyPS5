@@ -451,6 +451,11 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
             const auto binding = std::find_if(shader.bindings.begin(), shader.bindings.end(), [&](const auto& item) { return item.descriptorSet == key.first && item.binding == key.second; });
             Require(binding != shader.bindings.end(), "SPIR-V resource is absent from recompiler binding metadata");
             Require(binding->kind == ShaderRecompiler::DescriptorKind::Sampler || binding->kind == ShaderRecompiler::DescriptorKind::SampledImage || binding->kind == ShaderRecompiler::DescriptorKind::StorageImage, "SPIR-V descriptor type disagrees with recompiler binding metadata");
+            Require(type.size() == 4 && (type[0] & 0xffffu) == spv::OpTypeArray, "typed heap must be declared as a descriptor array");
+            const auto heap = static_cast<ShaderRecompiler::RuntimeAbi::Binding>(binding->binding % static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count));
+            const auto capacity = ShaderRecompiler::RuntimeAbi::HeapCapacity(heap);
+            const auto count = module.constants.find(type[3]);
+            Require(binding->count != 0u && binding->count <= capacity && count != module.constants.end() && count->second == capacity, "typed heap array length disagrees with runtime ABI");
         } else {
             Require(variable.storage == spv::StorageClassStorageBuffer && decoration.set && decoration.binding, "unsupported or unbound shader resource");
             const auto key = std::make_pair(*decoration.set, *decoration.binding);

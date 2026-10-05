@@ -46,10 +46,10 @@ struct IrBindingLayout {
     std::vector<IrDescriptorBinding> descriptors;
 
     [[nodiscard]] std::uint32_t DispatchThreadLimitDword() const {
-        return memoryOffsetDword + (memoryOffsetCount + 3u) / 4u;
+        return RuntimeAbi::DispatchThreadLimitDword;
     }
     [[nodiscard]] std::uint32_t ShaderDataDwords() const {
-        return DispatchThreadLimitDword() + (dispatchThreadLimit ? 3u : 0u);
+        return RuntimeAbi::ShaderDataDwords;
     }
     [[nodiscard]] bool UsesPushData() const {
         return pushDataStartDword != PushData::NoStart;

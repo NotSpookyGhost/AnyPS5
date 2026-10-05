@@ -22,6 +22,8 @@ ShaderDeviceProfile::ShaderDeviceProfile(const ShaderRecompiler::SpirvTarget& ta
     using Graphics::Require;
     Require(deviceInfo.pEnabledFeatures != nullptr, "shader device profile requires enabled core features");
     const auto& core = *deviceInfo.pEnabledFeatures;
+    const auto* robustness = findFeatures<VkPhysicalDeviceRobustness2FeaturesEXT>(deviceInfo.pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT);
+    nullDescriptors = robustness != nullptr && robustness->nullDescriptor == VK_TRUE;
     const auto* bda = findFeatures<VkPhysicalDeviceBufferDeviceAddressFeatures>(deviceInfo.pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES);
     const auto* bytes = findFeatures<VkPhysicalDevice8BitStorageFeatures>(deviceInfo.pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES);
     const auto* indexing = findFeatures<VkPhysicalDeviceDescriptorIndexingFeatures>(deviceInfo.pNext, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES);
@@ -32,8 +34,10 @@ ShaderDeviceProfile::ShaderDeviceProfile(const ShaderRecompiler::SpirvTarget& ta
     Require(target.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version, "shader device profile has an incompatible BDA ABI");
     Require(bda != nullptr && bda->bufferDeviceAddress == VK_TRUE && core.shaderInt64 == VK_TRUE, "shader runtime requires enabled bufferDeviceAddress and shaderInt64");
     Require(bytes != nullptr && bytes->storageBuffer8BitAccess == VK_TRUE, "shader runtime requires enabled storageBuffer8BitAccess");
+    Require(nullDescriptors, "shader runtime requires enabled nullDescriptor");
     Require(core.vertexPipelineStoresAndAtomics == VK_TRUE && core.fragmentStoresAndAtomics == VK_TRUE, "shader runtime requires enabled graphics stores and atomics");
     Require(limits.maxPushConstantsSize >= ShaderRecompiler::RuntimeAbi::PushConstantDwords * sizeof(std::uint32_t) && limits.maxBoundDescriptorSets > ShaderRecompiler::RuntimeAbi::DescriptorSet, "shader runtime ABI exceeds device limits");
+    Require(limits.maxStorageBufferRange >= sizeof(ShaderRecompiler::RuntimeAbi::ShaderData), "shader runtime ShaderData exceeds device limits");
     std::ranges::sort(capabilities);
     capabilities.erase(std::unique(capabilities.begin(), capabilities.end()), capabilities.end());
     const auto hasCapability = [&](spv::Capability capability) { return std::ranges::binary_search(capabilities, static_cast<std::uint32_t>(capability)); };

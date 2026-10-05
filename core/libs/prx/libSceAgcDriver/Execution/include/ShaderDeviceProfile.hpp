@@ -15,6 +15,7 @@ public:
     ShaderDeviceProfile& operator=(const ShaderDeviceProfile&) = delete;
     ShaderRecompiler::SpirvTarget Target() const { return target; }
     const VkPhysicalDeviceLimits& Limits() const { return limits; }
+    bool NullDescriptors() const { return nullDescriptors; }
 
 private:
     ShaderRecompiler::SpirvTarget target;
@@ -22,6 +23,7 @@ private:
     std::vector<std::uint32_t> capabilities;
     std::vector<std::string> extensions;
     std::vector<std::string_view> extensionViews;
+    bool nullDescriptors = false;
 };
 
 }

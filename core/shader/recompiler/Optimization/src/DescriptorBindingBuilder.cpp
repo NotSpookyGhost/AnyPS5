@@ -266,20 +266,45 @@ std::uint32_t ImageSamplerMask(const ShaderInfo& info, const std::vector<std::ui
 }
 
 std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads) {
-    std::vector<std::uint32_t> result(layout.ShaderDataDwords(), 0u);
+    RuntimeAbi::ShaderData data{};
+    data.version = RuntimeAbi::Version;
+    if (snapshot.images.size() > data.images.size() || snapshot.samplers.size() > data.samplers.size()) fail("runtime resource metadata capacity exceeded");
+    data.imageCount = static_cast<std::uint32_t>(snapshot.images.size());
+    data.samplerCount = static_cast<std::uint32_t>(snapshot.samplers.size());
     for (std::size_t i = 0; i < layout.userDataRegisters.size(); i++) {
         const std::uint32_t reg = layout.userDataRegisters[i];
         if (reg < userDataBase || reg - userDataBase >= snapshot.userData.size()) {
             fail("DescriptorBindingBuilder::Populate user-data register is out of range");
         }
-        result[i] = snapshot.userData[reg - userDataBase];
+        if (reg >= data.userData.size()) fail("runtime user-data capacity exceeded");
+        data.userData[reg] = snapshot.userData[reg - userDataBase];
     }
     if (layout.dispatchThreadLimit) {
         if (partialThreads == std::array<std::uint32_t, 3>{}) {
             fail("DescriptorBindingBuilder::Populate partial-group shader has no dispatch size");
         }
-        std::copy(partialThreads.begin(), partialThreads.end(), result.begin() + layout.DispatchThreadLimitDword());
+        std::copy(partialThreads.begin(), partialThreads.end(), data.dispatchThreadLimit.begin());
     }
+    for (const auto& binding : layout.descriptors) {
+        const bool image = ImageBindingResourceClass(binding.kind) != ImageResourceClass::None;
+        if (!image && binding.kind != DescriptorBindingKind::Samplers) continue;
+        if (binding.resources.size() > RuntimeAbi::HeapCapacity(binding.kind)) fail("runtime typed heap capacity exceeded");
+        for (std::size_t element = 0; element < binding.resources.size(); ++element) {
+            const auto resource = binding.resources[element];
+            auto& metadata = image ? data.images.at(resource) : data.samplers.at(resource);
+            const auto& descriptor = image ? snapshot.images.at(resource) : snapshot.samplers.at(resource);
+            if (metadata.elementCount == 0u) {
+                metadata.binding = static_cast<std::uint32_t>(binding.kind);
+                metadata.firstElement = static_cast<std::uint32_t>(element);
+                if (descriptor.dwordCount > metadata.descriptor.size()) fail("runtime resource descriptor width exceeded");
+                std::copy_n(descriptor.dwords.begin(), descriptor.dwordCount, metadata.descriptor.begin());
+                metadata.flags = image && descriptor.dwords[0] == 0u && (descriptor.dwords[1] & 0xffu) == 0u ? 1u : 0u;
+            }
+            ++metadata.elementCount;
+        }
+    }
+    std::vector<std::uint32_t> result(RuntimeAbi::ShaderDataDwords);
+    std::memcpy(result.data(), &data, sizeof(data));
     return result;
 }
 

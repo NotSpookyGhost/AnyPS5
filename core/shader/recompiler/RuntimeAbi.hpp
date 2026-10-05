@@ -1,32 +1,80 @@
 #ifndef CORE_SHADER_RECOMPILER_RUNTIMEABI_HPP
 #define CORE_SHADER_RECOMPILER_RUNTIMEABI_HPP
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <type_traits>
 #include <stdexcept>
 
 namespace ShaderRecompiler::RuntimeAbi {
 
-inline constexpr std::uint32_t Version = 1u;
+inline constexpr std::uint32_t Version = 2u;
 inline constexpr std::uint32_t DescriptorSet = 0u;
 inline constexpr std::uint32_t StageCount = 4u;
 inline constexpr std::uint32_t PushConstantDwords = 32u;
 inline constexpr std::uint32_t FirstImageBinding = 1u;
 inline constexpr std::uint32_t FirstComparisonImageBinding = 22u;
 inline constexpr std::uint32_t FirstStorageImageBinding = 29u;
-inline constexpr std::uint32_t ImageBindingCount = 43u;
+inline constexpr std::uint32_t ImageBindingCount = 48u;
 
 enum class Binding : std::uint32_t {
     Buffers = 0u,
-    Samplers = 44u,
-    Gds = 45u,
-    BdaPagetable = 46u,
-    FaultBuffer = 47u,
-    FlattenedSrt = 48u,
-    ShaderData = 49u,
-    Count = 50u
+    Samplers = 49u,
+    Gds = 50u,
+    BdaPagetable = 51u,
+    FaultBuffer = 52u,
+    FlattenedSrt = 53u,
+    ShaderData = 54u,
+    Count = 55u
 };
 
 enum class Stage : std::uint32_t { Main, Fragment, TessellationControl, TessellationEvaluation };
+
+inline constexpr std::uint32_t UserDataCapacity = 128u;
+inline constexpr std::uint32_t BufferCapacity = 128u;
+inline constexpr std::uint32_t ImageCapacity = 256u;
+inline constexpr std::uint32_t SampledHeapCapacity = 16u;
+inline constexpr std::uint32_t StorageHeapCapacity = 4u;
+inline constexpr std::uint32_t SamplerHeapCapacity = 16u;
+
+struct ResourceMetadata {
+    std::uint32_t binding;
+    std::uint32_t firstElement;
+    std::uint32_t elementCount;
+    std::uint32_t flags;
+    std::array<std::uint32_t, 8> descriptor;
+};
+
+struct ShaderData {
+    std::uint32_t version;
+    std::uint32_t imageCount;
+    std::uint32_t samplerCount;
+    std::uint32_t reserved;
+    std::array<std::uint32_t, UserDataCapacity> userData;
+    std::array<std::uint32_t, BufferCapacity / 4u> bufferOffsets;
+    std::array<std::uint32_t, 4> dispatchThreadLimit;
+    std::array<ResourceMetadata, ImageCapacity> images;
+    std::array<ResourceMetadata, SamplerHeapCapacity> samplers;
+};
+
+inline constexpr std::uint32_t UserDataDword = offsetof(ShaderData, userData) / sizeof(std::uint32_t);
+inline constexpr std::uint32_t BufferOffsetsDword = offsetof(ShaderData, bufferOffsets) / sizeof(std::uint32_t);
+inline constexpr std::uint32_t DispatchThreadLimitDword = offsetof(ShaderData, dispatchThreadLimit) / sizeof(std::uint32_t);
+inline constexpr std::uint32_t ShaderDataDwords = sizeof(ShaderData) / sizeof(std::uint32_t);
+
+inline std::uint32_t HeapCapacity(Binding binding) {
+    const auto value = static_cast<std::uint32_t>(binding);
+    if (value >= FirstImageBinding && value < FirstStorageImageBinding) return SampledHeapCapacity;
+    if (value >= FirstStorageImageBinding && value < static_cast<std::uint32_t>(Binding::Samplers)) return StorageHeapCapacity;
+    if (binding == Binding::Samplers) return SamplerHeapCapacity;
+    throw std::runtime_error("Shader runtime ABI: binding is not a typed heap");
+}
+
+static_assert(std::is_standard_layout_v<ResourceMetadata> && std::is_trivially_copyable_v<ResourceMetadata> && sizeof(ResourceMetadata) == 48u);
+static_assert(std::is_standard_layout_v<ShaderData> && std::is_trivially_copyable_v<ShaderData> && sizeof(ShaderData) == 13728u);
+static_assert(UserDataDword == 4u && BufferOffsetsDword == 132u && DispatchThreadLimitDword == 164u);
+static_assert(offsetof(ResourceMetadata, descriptor) == 16u && offsetof(ShaderData, images) == 672u && offsetof(ShaderData, samplers) == 12960u);
 
 inline void RequireVersion(std::uint32_t version) {
     if (version != Version) throw std::runtime_error("Shader runtime ABI: incompatible version");
