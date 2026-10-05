@@ -155,8 +155,6 @@ CompiledVariant sampleVariant() {
     buffer.source = 3;
     buffer.firstUsePc = 0x40;
     buffer.maxByteExtent = 256;
-    buffer.packedStride = 16;
-    buffer.descriptorSwizzle = 0x123u;
     buffer.imageAlias = 1;
     buffer.read = true;
     buffer.atomic = true;
@@ -235,7 +233,6 @@ struct SampleRequest {
         request.target.maxWorkgroupInvocations = 1024;
         request.target.maxWorkgroupSharedMemoryBytes = 49152;
         request.layout = {0, 0, 0, 128};
-        specialization.buffers = {{16u, IrBufferFormat::Invalid, 0xfacu}};
         specialization.images = {ResourceSpecialization::Image{}};
         specialization.boundDescriptors = {0, 0};
     }
@@ -299,7 +296,7 @@ void verifyEntryRoundTrip() {
     otherKey.back() ^= std::byte{1};
     require(ShaderDiskCache::DecodeEntry(file, otherKey, decoded) == ShaderDiskCache::LoadStatus::KeyMismatch, "an entry for another key loads");
     auto previousVersion = file;
-    previousVersion[4] = std::byte{3};
+    previousVersion[4] = std::byte{4};
     require(ShaderDiskCache::DecodeEntry(previousVersion, key, decoded) == ShaderDiskCache::LoadStatus::Rejected, "an entry with the previous format version loads");
 }
 
@@ -367,10 +364,6 @@ void verifyKeySensitivity() {
     changes("the first binding", [](SampleRequest& sample) { sample.request.layout.firstBinding = 1; });
     changes("the push constant offset", [](SampleRequest& sample) { sample.request.layout.pushConstantOffsetBytes = 16; });
     changes("the push constant size", [](SampleRequest& sample) { sample.request.layout.pushConstantSizeBytes = 64; });
-    changes("a buffer stride", [](SampleRequest& sample) { sample.specialization.buffers[0].packedStride = 32; });
-    changes("a buffer format", [](SampleRequest& sample) { sample.specialization.buffers[0].descriptorFormat = static_cast<IrBufferFormat>(1); });
-    changes("a buffer swizzle", [](SampleRequest& sample) { sample.specialization.buffers[0].descriptorSwizzle = 0xfadu; });
-    changes("the buffer count", [](SampleRequest& sample) { sample.specialization.buffers.emplace_back(); });
     changes("an image class", [](SampleRequest& sample) { sample.specialization.images[0].numericClass = IrTextureNumericClass::Float; });
     changes("an image dimension", [](SampleRequest& sample) { sample.specialization.images[0].dimension = static_cast<RdnaImageDimension>(1); });
     changes("an image mip count", [](SampleRequest& sample) { sample.specialization.images[0].mipCount = 2; });
@@ -427,7 +420,8 @@ void verifyStore() {
 struct ComputeRequest {
     std::vector<std::uint32_t> code{0xe0700000u, 0x80000000u, 0xbf810000u};
     std::array<std::uint32_t, 4> userData{0x10000000u, 0x00000000u, 0x40u, 0x00027facu};
-    std::array<std::uint32_t, 1> capabilities{1u};
+    std::array<std::uint32_t, 4> capabilities{1u, 11u, 5347u, 4448u};
+    std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
     RecompileRequest request{};
 
     explicit ComputeRequest(bool useCache) {
@@ -440,6 +434,8 @@ struct ComputeRequest {
         request.target.spirvVersion = 0x00010300u;
         request.target.subgroupSize = 32;
         request.target.supportedCapabilities = capabilities;
+        request.target.supportedExtensions = extensions;
+        request.target.bdaAbiVersion = 1u;
         request.layout.pushConstantSizeBytes = 128;
         request.useCache = useCache;
     }
@@ -573,6 +569,28 @@ void verifyInvocationIsolation() {
     request.userData[0] -= 0x10000u;
     const auto restored = Recompile(request.request);
     requireSameResult(first, restored, "restored invocation");
+    const auto original = request.userData;
+    const std::array<std::array<std::uint32_t, 4>, 6> descriptors{{
+        {original[0] + 0x20000u, original[1], original[2], original[3]},
+        {original[0], original[1], original[2] / 2u, original[3]},
+        {original[0], original[1] | (16u << 16u), original[2], original[3]},
+        {original[0], original[1], original[2], 0x31004688u},
+        {original[0], original[1] | 0x80100000u, original[2], original[3] | 0x00600000u},
+        {0u, 0u, 0u, 0u}
+    }};
+    for (const auto& descriptor : descriptors) {
+        request.userData = descriptor;
+        const auto changed = Recompile(request.request);
+        require(changed.cacheHit && first.variantId == changed.variantId, "buffer metadata changed the compiled variant");
+        requireSameArtifact(first, changed, "runtime buffer artifact");
+        require(first.spirv.data() == changed.spirv.data(), "buffer metadata duplicated the SPIR-V");
+    }
+    request.userData = original;
+    request.userData[3] |= 0x40000000u;
+    bool rejected = false;
+    try { static_cast<void>(Recompile(request.request)); }
+    catch (const std::runtime_error&) { rejected = true; }
+    require(rejected, "an unsupported buffer descriptor type was accepted");
 }
 
 void verifyDefaultDirectory(const char* self) {

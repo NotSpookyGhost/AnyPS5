@@ -72,7 +72,7 @@ static_assert(sizeof(VertexInput) == 12, "VertexInput changed: update the vertex
 static_assert(sizeof(FragmentParameter) == 12, "FragmentParameter changed: update the parameter encoder");
 static_assert(sizeof(CompiledShaderInfo) == 304, "CompiledShaderInfo changed: update the info encoder");
 static_assert(sizeof(ShaderInfo) == 200, "ShaderInfo changed: update the info encoder");
-static_assert(sizeof(BufferResource) == 36, "BufferResource changed: update the info encoder");
+static_assert(sizeof(BufferResource) == 24, "BufferResource changed: update the info encoder");
 static_assert(sizeof(ImageResource) == 96, "ImageResource changed: update the info encoder");
 static_assert(sizeof(SamplerResource) == 12, "SamplerResource changed: update the info encoder");
 static_assert(sizeof(SampledResourcePair) == 12, "SampledResourcePair changed: update the info encoder");
@@ -82,8 +82,7 @@ static_assert(sizeof(IrBindingLayout) == 64, "IrBindingLayout changed: update th
 static_assert(sizeof(IrDescriptorBinding) == 32, "IrDescriptorBinding changed: update the layout encoder");
 static_assert(sizeof(BindingAllocationResult) == 120, "BindingAllocationResult changed: update the allocation encoder");
 static_assert(sizeof(CompiledBindingLayout) == 72, "CompiledBindingLayout changed: update the allocation encoder");
-static_assert(sizeof(ResourceSpecialization) == 72, "ResourceSpecialization changed: update BuildKey");
-static_assert(sizeof(ResourceSpecialization::Buffer) == 16, "ResourceSpecialization::Buffer changed: update BuildKey");
+static_assert(sizeof(ResourceSpecialization) == 48, "ResourceSpecialization changed: update BuildKey");
 static_assert(sizeof(ResourceSpecialization::Image) == 48, "ResourceSpecialization::Image changed: update BuildKey");
 static_assert(sizeof(BindingLayout) == 16, "BindingLayout changed: update BuildKey");
 #endif
@@ -404,16 +403,12 @@ void encodeInfo(Writer& writer, const CompiledShaderInfo& compiled) {
         out.Value(buffer.source);
         out.Value(buffer.firstUsePc);
         out.Value(buffer.maxByteExtent);
-        out.Value(buffer.packedStride);
-        out.Value(buffer.descriptorFormat);
-        out.Value(buffer.descriptorSwizzle);
         out.Value(buffer.imageAlias);
         out.Value(buffer.read);
         out.Value(buffer.written);
         out.Value(buffer.atomic);
         out.Value(buffer.formatted);
         out.Value(buffer.scalar);
-        out.Value(buffer.empty);
     });
     writer.List(info.images, [](Writer& out, const ImageResource& image) {
         out.Value(image.source);
@@ -493,20 +488,16 @@ void decodeInfo(Reader& reader, CompiledShaderInfo& compiled) {
     auto& info = compiled.info;
     reader.Value(info.scratchDwords);
     reader.Value(info.sharedMemoryBytes);
-    reader.List(info.buffers, 34, [](Reader& in, BufferResource& buffer) {
+    reader.List(info.buffers, 21, [](Reader& in, BufferResource& buffer) {
         in.Value(buffer.source);
         in.Value(buffer.firstUsePc);
         in.Value(buffer.maxByteExtent);
-        in.Value(buffer.packedStride);
-        in.Value(buffer.descriptorFormat);
-        in.Value(buffer.descriptorSwizzle);
         in.Value(buffer.imageAlias);
         in.Value(buffer.read);
         in.Value(buffer.written);
         in.Value(buffer.atomic);
         in.Value(buffer.formatted);
         in.Value(buffer.scalar);
-        in.Value(buffer.empty);
     });
     reader.List(info.images, 63, [](Reader& in, ImageResource& image) {
         in.Value(image.source);
@@ -819,12 +810,6 @@ void BuildKey(const RecompileRequest& request, std::uint32_t hostSubgroupSize, c
     writer.Value(request.layout.firstBinding);
     writer.Value(request.layout.pushConstantOffsetBytes);
     writer.Value(request.layout.pushConstantSizeBytes);
-    writer.List(specialization.buffers, [](Writer& out, const ResourceSpecialization::Buffer& buffer) {
-        out.Value(buffer.packedStride);
-        out.Value(buffer.descriptorFormat);
-        out.Value(buffer.descriptorSwizzle);
-        out.Value(buffer.empty);
-    });
     writer.List(specialization.images, [](Writer& out, const ResourceSpecialization::Image& image) {
         out.Value(image.numericClass);
         out.Value(image.dimension);

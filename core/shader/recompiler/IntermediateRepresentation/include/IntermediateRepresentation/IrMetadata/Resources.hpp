@@ -17,16 +17,12 @@ struct BufferResource {
     std::uint32_t source = 0;
     std::uint32_t firstUsePc = 0;
     std::uint32_t maxByteExtent = 0;
-    std::uint32_t packedStride = 0;
-    IrBufferFormat descriptorFormat = IrBufferFormat::Invalid;
-    std::uint32_t descriptorSwizzle = 0x00000facu;
     std::uint32_t imageAlias = NoImageAlias;
     bool read = false;
     bool written = false;
     bool atomic = false;
     bool formatted = false;
     bool scalar = false;
-    bool empty = false;
 
     bool operator==(const BufferResource& other) const = default;
 };

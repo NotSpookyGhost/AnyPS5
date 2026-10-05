@@ -574,27 +574,10 @@ std::uint32_t emulatedCompareState(const IrResourcePlan& plan, const ResourceSna
 
 void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& snapshot, const std::vector<TableResolution>& tables, ResourceSpecialization& specialization) {
     ResourceSpecialization result;
-    result.buffers.reserve(plan.info.buffers.size());
-    for (std::uint32_t i = 0; i < plan.info.buffers.size(); i++) {
-        const ShaderBufferResource decoded = decodeBufferDescriptor(snapshot.buffers[i]);
-        if (decoded.Type() != 0u) {
-            throw std::runtime_error("buffer descriptor uses an unsupported type");
-        }
-        auto packedStride = decoded.PackedStride();
-        const auto stride = packedStride & 0x3fffu;
-        const bool swizzleActive = stride != 0u && ((packedStride >> 14u) & 1u) != 0u;
-        if (stride == 0u) {
-            packedStride &= ~((1u << 14u) | (3u << 16u));
-        } else if (!swizzleActive) {
-            packedStride &= ~(3u << 16u);
-        }
-        const auto& buffer = plan.info.buffers[i];
-        ResourceSpecialization::Buffer entry;
-        entry.packedStride = packedStride;
-        entry.descriptorFormat = buffer.formatted ? decoded.Format() : IrBufferFormat::Invalid;
-        entry.descriptorSwizzle = buffer.formatted ? decoded.DstSelXYZW() : DstSel(4, 5, 6, 7);
-        entry.empty = decoded.GetSize() == 0u || decoded.Base48() == 0u;
-        result.buffers.push_back(entry);
+    for (std::uint32_t i = 0; i < plan.info.buffers.size(); ++i) {
+        const auto decoded = decodeBufferDescriptor(snapshot.buffers.at(i));
+        if (decoded.Type() != 0u) throw std::runtime_error("buffer descriptor uses an unsupported type");
+        if (plan.stage != IrShaderStage::Compute && decoded.AddTid()) throw std::runtime_error("buffer ADD_TID is only valid for compute shaders");
     }
 
     result.images.reserve(plan.info.images.size());
@@ -652,8 +635,8 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
     }
 
     result.boundDescriptors.clear();
-    result.boundDescriptors.reserve(result.buffers.size() + result.images.size());
-    for (std::uint32_t index = 0; index < result.buffers.size(); index++) {
+    result.boundDescriptors.reserve(plan.info.buffers.size() + result.images.size());
+    for (std::uint32_t index = 0; index < plan.info.buffers.size(); index++) {
         result.boundDescriptors.push_back(index);
     }
     for (std::uint32_t index = 0; index < result.images.size(); index++) {
@@ -669,21 +652,11 @@ void ResourceMaterializer::Apply(IrProgram& program, const ResourceSpecializatio
     if (!resources.resourceTrackingComplete) {
         throw std::runtime_error("ResourceMaterializer::Apply requires a completed resource plan");
     }
-    if (resources.info.buffers.size() != specialization.buffers.size()) {
-        throw std::runtime_error("ResourceMaterializer::Apply buffer count mismatch");
-    }
     if (resources.info.images.size() > specialization.images.size()) {
         throw std::runtime_error("ResourceMaterializer::Apply image count mismatch");
     }
 
     auto buffers = resources.info.buffers;
-    for (std::uint32_t i = 0; i < buffers.size(); i++) {
-        buffers[i].packedStride = specialization.buffers[i].packedStride;
-        buffers[i].descriptorFormat = specialization.buffers[i].descriptorFormat;
-        buffers[i].descriptorSwizzle = specialization.buffers[i].descriptorSwizzle;
-        buffers[i].empty = specialization.buffers[i].empty;
-    }
-
     auto images = resources.info.images;
     images.reserve(specialization.images.size());
     for (std::uint32_t index = 0; index < specialization.images.size(); index++) {
@@ -1034,16 +1007,12 @@ void ResourceMaterializer::CountBindlessRejection(BindlessRejection reason) {
     if (reason < BindlessRejection::Count) bindlessCounters().rejected[static_cast<std::size_t>(reason)].fetch_add(1, std::memory_order_relaxed);
 }
 
-bool ResourceSpecialization::Buffer::operator==(const Buffer& other) const {
-    return packedStride == other.packedStride && descriptorFormat == other.descriptorFormat && descriptorSwizzle == other.descriptorSwizzle && empty == other.empty;
-}
-
 bool ResourceSpecialization::Image::operator==(const Image& other) const {
     return numericClass == other.numericClass && dimension == other.dimension && mipCount == other.mipCount && conversionFormat == other.conversionFormat && shaderSwizzle == other.shaderSwizzle && indirectRoot == other.indirectRoot && indirectMappingOffset == other.indirectMappingOffset && indirectSearchIterations == other.indirectSearchIterations && cube == other.cube && fmask == other.fmask && depthBits == other.depthBits && depthUnorm16 == other.depthUnorm16 && packedFormat == other.packedFormat && emulatedCompare == other.emulatedCompare && srgbDecode == other.srgbDecode;
 }
 
 bool ResourceSpecialization::operator==(const ResourceSpecialization& other) const {
-    return buffers == other.buffers && images == other.images;
+    return images == other.images;
 }
 
 }

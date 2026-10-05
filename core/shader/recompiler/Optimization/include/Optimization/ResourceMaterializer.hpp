@@ -9,15 +9,6 @@
 namespace ShaderRecompiler {
 
 struct ResourceSpecialization {
-    struct Buffer {
-        std::uint32_t packedStride = 0;
-        IrBufferFormat descriptorFormat = IrBufferFormat::Invalid;
-        std::uint32_t descriptorSwizzle = ShaderImageIdentitySwizzle;
-        bool empty = false;
-
-        bool operator==(const Buffer& other) const;
-    };
-
     struct Image {
         IrTextureNumericClass numericClass = IrTextureNumericClass::Unsupported;
         RdnaImageDimension dimension = RdnaImageDimension::Unknown;
@@ -38,7 +29,6 @@ struct ResourceSpecialization {
         bool operator==(const Image& other) const;
     };
 
-    std::vector<Buffer> buffers;
     std::vector<Image> images;
 
     bool operator==(const ResourceSpecialization& other) const;

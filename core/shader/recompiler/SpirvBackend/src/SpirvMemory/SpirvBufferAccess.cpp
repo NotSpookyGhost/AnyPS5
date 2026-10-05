@@ -46,20 +46,6 @@ std::uint32_t EmitShaderDataDwordLoad(SpirvEmitterState& state, std::uint32_t dw
     return value;
 }
 
-std::uint32_t StorageBufferPackedStride(const SpirvEmitterState& state, const MemoryInfo& mem) {
-    if (mem.resource >= state.program.Info().buffers.size()) {
-        ExitDescriptorBindingFailure(state, DescriptorBindingKind::Buffers, mem.resource, "buffer specialization is missing");
-    }
-    return state.program.Info().buffers[mem.resource].packedStride;
-}
-
-IrBufferFormat StorageBufferFormat(const SpirvEmitterState& state, const MemoryInfo& mem) {
-    if (mem.resource >= state.program.Info().buffers.size()) {
-        ExitDescriptorBindingFailure(state, DescriptorBindingKind::Buffers, mem.resource, "buffer specialization is missing");
-    }
-    return state.program.Info().buffers[mem.resource].descriptorFormat;
-}
-
 void EmitMemoryOffsets(SpirvEmitterState& state) {
     const IrBindingLayout& layout = state.program.Metadata().bindings;
     state.memoryByteOffsets.assign(layout.memoryOffsetCount, 0u);
@@ -84,25 +70,6 @@ std::uint32_t EmitLdsLockPointer(SpirvEmitterState& state) {
     const auto pointer = state.module.AllocateId();
     state.module.AddFunction(spv::OpAccessChain, TypeU32ElementPointer(state, spv::StorageClassWorkgroup), pointer, state.ldsVariable, ConstantU32(state, LdsDwordCount(state)));
     return pointer;
-}
-
-MemoryResourceAccess PrepareStorageBufferResourceAccess(SpirvEmitterState& state, const MemoryInfo& mem, std::uint32_t variable, std::uint32_t pointerType) {
-    if (variable == 0) {
-        ExitDescriptorBindingFailure(state, DescriptorBindingKind::Buffers, mem.resource, "storage buffer descriptor array was not emitted");
-    }
-    const auto arrayIndex = ResourceForDescriptor(state, DescriptorBindingKind::Buffers, mem.resource);
-    MemoryResourceAccess access;
-    access.kind = mem.kind;
-    access.objectPointer = state.module.AllocateId();
-    state.module.AddFunction(spv::OpAccessChain, pointerType, access.objectPointer, variable, ConstantU32(state, arrayIndex));
-    access.byteOffset = state.memoryByteOffsets.at(arrayIndex);
-    access.memoryAccess = mem.coherent ? spv::MemoryAccessVolatileMask : 0u;
-    access.length = state.module.AllocateId();
-    state.module.AddFunction(spv::OpArrayLength, TypeU32(state), access.length, access.objectPointer, 0u);
-    if (mem.resource < state.program.Info().buffers.size() && state.program.Info().buffers[mem.resource].empty) {
-        access.length = ConstantU32(state, 0u);
-    }
-    return access;
 }
 
 MemoryResourceAccess PrepareMemoryResourceAccess(SpirvEmitterState& state, const MemoryInfo& mem) {
@@ -137,10 +104,7 @@ MemoryResourceAccess PrepareMemoryResourceAccess(SpirvEmitterState& state, const
         FailEmit("physical address memory must use the BDA emitter");
     case ResourceKind::ScalarBuffer:
     case ResourceKind::Buffer:
-        access = PrepareStorageBufferResourceAccess(state, mem, state.storageBufferVariable, TypeStorageBufferPointer(state));
-        access.indexOffset = EmitBinaryU32(state, spv::OpShiftRightLogical, access.byteOffset, ConstantU32(state, 2u));
-        access.addIndexOffset = true;
-        return access;
+        FailEmit("buffer memory must use the runtime V# emitter");
     default:
         FailEmit("unsupported memory resource kind " + std::to_string(static_cast<std::uint32_t>(mem.kind)));
     }
