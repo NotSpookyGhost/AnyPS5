@@ -134,7 +134,7 @@ void CheckHeaps() {
     image.numericClass = IrTextureNumericClass::Float;
     image.dimension = RdnaImageDimension::Dim2D;
     const auto single = allocate(image, 1u);
-    const auto full = allocate(image, RuntimeAbi::SampledHeapCapacity, RuntimeAbi::SamplerHeapCapacity);
+    const auto full = allocate(image, RuntimeAbi::SampledHeapCapacity, RuntimeAbi::SamplerHeapCapacity / 2u);
     Require(single.layout.ShaderDataDwords() == full.layout.ShaderDataDwords() && single.layout.memoryOffsetDword == full.layout.memoryOffsetDword && !full.layout.UsesPushData(), "runtime layout depends on resource count");
     Require(full.layout.memoryOffsetDword == 132u && full.layout.DispatchThreadLimitDword() == 164u && full.layout.ShaderDataDwords() == 3432u, "runtime layout offsets changed");
     Reject([&] { allocate(image, RuntimeAbi::SampledHeapCapacity + 1u); }, "heap capacity exceeded");
@@ -144,8 +144,8 @@ void CheckHeaps() {
     image.mipCount = RuntimeAbi::StorageHeapCapacity;
     const auto storage = allocate(image, 1u);
     Require(BindingAllocator{}.FindBinding(storage.layout, DescriptorBindingForImage(image)).resources.size() == image.mipCount, "storage heap did not reserve each mip");
-    ++image.mipCount;
-    Reject([&] { allocate(image, 1u); }, "heap capacity exceeded");
+    Reject([&] { allocate(image, 2u); }, "heap capacity exceeded");
+    Reject([&] { allocate(image, 0u, RuntimeAbi::SamplerHeapCapacity / 2u + 1u); }, "sampler pairs");
     const std::array dimensions{RdnaImageDimension::Dim1D, RdnaImageDimension::Dim1DArray, RdnaImageDimension::Dim2D, RdnaImageDimension::Dim2DArray, RdnaImageDimension::Dim3D, RdnaImageDimension::Dim2DMsaa, RdnaImageDimension::Dim2DMsaaArray};
     std::set<std::uint32_t> classes;
     for (std::uint32_t group = 0u; group < 7u; ++group) {

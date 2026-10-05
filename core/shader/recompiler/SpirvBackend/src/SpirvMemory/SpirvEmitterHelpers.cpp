@@ -1,3 +1,4 @@
+#include "Optimization/ResourceMaterializer.hpp"
 #include "BdaAbi.hpp"
 #include "SpirvBackend/SpirvEmitterHelpers.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvTypes.hpp"
@@ -433,7 +434,10 @@ void DefineDescriptors(SpirvEmitterState& state) {
             if (ImageBindingResourceClass(binding.kind) == ImageResourceClass::None) {
                 FailEmit("descriptor binding has an unmapped image resource class");
             }
-            const ImageResource& image = state.program.Info().images.at(binding.resources.front());
+            const auto modes = ResourceMaterializer::RuntimeImageModes(state.program.Info().images.at(binding.resources.front()));
+            const auto selected = std::ranges::find_if(modes, [&](const ImageResource& mode) { return DescriptorBindingForImage(mode) == binding.kind; });
+            if (selected == modes.end()) FailEmit("static image heap has no runtime mode");
+            const auto& image = *selected;
             const auto name = "image_" + std::to_string(static_cast<std::uint32_t>(binding.kind));
             state.imageVariables.at(ImageBindingIndex(binding.kind)) = Define(ArrayType(ImageType(state, image)), name.c_str(), spv::StorageClassUniformConstant);
             if (image.dimension == RdnaImageDimension::Dim1D || image.dimension == RdnaImageDimension::Dim1DArray) {

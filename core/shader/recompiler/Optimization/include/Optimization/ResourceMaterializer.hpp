@@ -43,6 +43,8 @@ enum class BindlessRejection { Capacity, MaterialScan, NoEntry, Storage, NonUnif
 class ResourceMaterializer {
 public:
     void Apply(IrProgram& program, const ResourceSpecialization& specialization) const;
+    static std::vector<ImageResource> RuntimeImageModes(const ImageResource& image);
+    static std::uint32_t RuntimeImageMode(const ImageResource& image, const DescriptorValue& descriptor);
     [[nodiscard]] IrResourcePlan ExtractPlan(const IrProgram& program) const;
     void Materialize(const IrResourcePlan& program, const SrtRuntime& runtime, ResourceSnapshot& snapshot, ResourceSpecialization& specialization) const;
     // APS5_PROFILE_DRAW: the time Materialize spent building specializations, over every call.

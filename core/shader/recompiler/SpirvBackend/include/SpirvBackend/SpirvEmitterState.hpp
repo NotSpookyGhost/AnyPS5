@@ -71,6 +71,8 @@ struct MemoryResourceAccess {
 };
 
 struct SpirvEmitterState {
+    const ImageResource* runtimeImage = nullptr;
+    std::uint32_t runtimeImageMetadata = 0u;
     SpirvEmitterState(const IrProgram& program, const ShaderStageInputInfo& inputInfo);
 
     SpirvModule module;

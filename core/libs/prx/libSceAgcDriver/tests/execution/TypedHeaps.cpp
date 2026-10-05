@@ -36,7 +36,7 @@ ShaderRecompiler::RecompileResult Compile(AgcDriver::VulkanDevice& device, std::
     ShaderRecompiler::RuntimeAbi::ShaderData data{};
     std::memcpy(&data, dataBinding->guestDescriptor.data(), sizeof(data));
     Require(data.version == ShaderRecompiler::RuntimeAbi::Version && data.imageCount == 1u, "resource metadata header is invalid");
-    Require(data.images[0].elementCount == 1u && data.images[0].firstElement == 0u && data.images[0].flags == (nullImage ? 1u : 0u), "image heap metadata is invalid");
+    Require(data.images[0].elementCount == 1u && data.images[0].firstElement == 0u && (data.images[0].flags & 1u) == (nullImage ? 1u : 0u), "image heap metadata is invalid");
     return result;
 }
 

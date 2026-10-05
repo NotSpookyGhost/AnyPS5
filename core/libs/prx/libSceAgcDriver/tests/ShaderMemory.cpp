@@ -302,7 +302,7 @@ void verifyBindlessTable() {
     const auto capture = memory.Capture(request);
     const auto root = tableRoot(*capture, direct);
     require(capture->snapshot.images[root].dwords == heap[0] && capture->snapshot.images[direct].dwords == heap[1] && capture->snapshot.images[direct + 1u].dwords == heap[3], "bindless: the slots do not hold the keyed entries");
-    for (std::uint32_t i = direct + 2u; i < capture->snapshot.images.size(); i++) require(capture->snapshot.images[i].dwords == heap[0], "bindless: a pad slot is not a copy of slot 0");
+    for (std::uint32_t i = direct + 2u; i < capture->snapshot.images.size(); i++) require(capture->snapshot.images[i].dwords == heap[2], "bindless: a pad slot is not null");
     const auto mapping = mappingOf(capture->snapshot);
     require(std::vector<std::uint32_t>(mapping.begin(), mapping.begin() + 7) == std::vector<std::uint32_t>{3u, 0u, 0u, 1u, 1u, 3u, 2u}, "bindless: the (key, slot) mapping is wrong");
     require(capture->specialization.images[root].indirectMappingOffset + mapping.size() == capture->snapshot.flattenedSrt.size(), "bindless: the mapping offset does not name the block");
@@ -342,7 +342,7 @@ void verifyBindlessTable() {
         return result;
     };
     const auto uniform = scan(compiled->spirv);
-    require(uniform.dynamicIndexing && !uniform.switched, "bindless: the SPIR-V does not index the image array dynamically");
+    require(uniform.dynamicIndexing && uniform.switched, "bindless: the SPIR-V does not index the image array dynamically");
     require(!uniform.shaderNonUniform && !uniform.nonUniform, "bindless: a single-subgroup workgroup was decorated NonUniform");
 #if ANYPS5_ENABLE_SPIRV_TOOLS
     static_cast<void>(ValidateAndOptimizeSpirv(compiled->spirv, request.target.vulkanVersion, request.target.spirvVersion));
@@ -381,11 +381,9 @@ void verifyBindlessTable() {
     const auto nullCapture = nullMemory.Capture(request);
     const auto nullMapping = mappingOf(nullCapture->snapshot);
     require(std::vector<std::uint32_t>(nullMapping.begin(), nullMapping.begin() + 5) == std::vector<std::uint32_t>{2u, 0u, 0u, 1u, 1u}, "bindless: a null entry's key was mapped");
-    require(nullCapture->snapshot.images[direct + 1u].dwords == heap[0], "bindless: a null entry's slot is not the pad");
+    require(nullCapture->snapshot.images[direct + 1u].dwords == heap[2], "bindless: a null entry's slot is not the pad");
     materials[2][1] = 3u;
 
-    // Mode T: every entry keeps its slot; the null entry's slot holds the pad and its key is
-    // left out of the mapping.
     auto whole = makeRequest(wholeCode);
     const auto wholePlan = GetResourcePlan(whole);
     for (const auto& source : wholePlan->descriptorSources) {
@@ -397,7 +395,7 @@ void verifyBindlessTable() {
     const auto wholeRoot = tableRoot(*wholeCapture, wholeDirect);
     const auto wholeMapping = mappingOf(wholeCapture->snapshot);
     require(std::vector<std::uint32_t>(wholeMapping.begin(), wholeMapping.begin() + 7) == std::vector<std::uint32_t>{3u, 0u, 0u, 1u, 1u, 3u, 3u}, "bindless: mode T is not the identity mapping");
-    require(wholeCapture->snapshot.images[wholeRoot].dwords == heap[0] && wholeCapture->snapshot.images[wholeDirect].dwords == heap[1] && wholeCapture->snapshot.images[wholeDirect + 1u].dwords == heap[0] && wholeCapture->snapshot.images[wholeDirect + 2u].dwords == heap[3], "bindless: mode T slots are wrong");
+    require(wholeCapture->snapshot.images[wholeRoot].dwords == heap[0] && wholeCapture->snapshot.images[wholeDirect].dwords == heap[1] && wholeCapture->snapshot.images[wholeDirect + 1u].dwords == heap[2] && wholeCapture->snapshot.images[wholeDirect + 2u].dwords == heap[3], "bindless: mode T slots are wrong");
     whole.context.memory = wholeMemory.Regions();
     require(!Recompile(whole, *wholeCapture)->spirv.empty(), "bindless: mode T did not compile");
 
@@ -435,7 +433,8 @@ void verifyDescriptorPhis() {
     std::copy(second.begin(), second.end(), srt.begin() + 24);
     const auto srtAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(srt.data()));
     const std::array<std::uint32_t, 2> userData{static_cast<std::uint32_t>(srtAddress), static_cast<std::uint32_t>(srtAddress >> 32u)};
-    const std::array<std::uint32_t, 1> capabilities{29u};
+    const std::array<std::uint32_t, 4> capabilities{29u, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
     const auto makeRequest = [&](const std::vector<std::uint32_t>& code, std::uint32_t waveSize = 32u) {
         RecompileRequest request{};
         request.shader = {ShaderStage::Compute, 0x21000u, code, 0, {}};
@@ -447,6 +446,8 @@ void verifyDescriptorPhis() {
         request.target.spirvVersion = 0x00010300u;
         request.target.subgroupSize = 32;
         request.target.supportedCapabilities = capabilities;
+        request.target.supportedExtensions = extensions;
+        request.target.bdaAbiVersion = BdaAbi::Version;
         request.target.fragmentShaderBarycentricEnabled = false;
         request.layout.pushConstantSizeBytes = 128;
         return request;
@@ -475,7 +476,7 @@ void verifyDescriptorPhis() {
         const auto capture = memory.Capture(request);
         request.context.memory = memory.Regions();
         const auto compiled = Recompile(request, *capture);
-        require(countOps(compiled->spirv, OpImageSampleExplicitLod) == 2u, "descriptor Phi: the SPIR-V does not sample once per edge");
+        require(countOps(compiled->spirv, OpImageSampleExplicitLod) == 2u * ResourceMaterializer::RuntimeImageModes(plan->info.images.front()).size(), "descriptor Phi: the SPIR-V does not sample once per runtime mode and edge");
 #if ANYPS5_ENABLE_SPIRV_TOOLS
         static_cast<void>(ValidateAndOptimizeSpirv(compiled->spirv, request.target.vulkanVersion, request.target.spirvVersion));
 #endif
@@ -505,7 +506,7 @@ void verifyDescriptorPhis() {
     AgcDriver::ShaderMemory twoLaneMemory({});
     const auto twoLaneCapture = twoLaneMemory.Capture(twoLane);
     twoLane.context.memory = twoLaneMemory.Regions();
-    require(countOps(Recompile(twoLane, *twoLaneCapture)->spirv, OpImageSampleExplicitLod) == 4u, "descriptor Phi: the two-lane SPIR-V does not sample once per edge and half");
+    require(countOps(Recompile(twoLane, *twoLaneCapture)->spirv, OpImageSampleExplicitLod) == 4u * ResourceMaterializer::RuntimeImageModes(GetResourcePlan(twoLane)->info.images.front()).size(), "descriptor Phi: the two-lane SPIR-V does not sample once per runtime mode, edge and half");
 
     auto dynamic = makeRequest(dynamicCode);
     expectFailure([&] { static_cast<void>(GetResourcePlan(dynamic)); }, "GetSamplerResource dword 0 is not a valid runtime value", "descriptor Phi: an edge without an SRT slot was accepted");

@@ -1,4 +1,5 @@
 #include "Optimization/DescriptorBindingBuilder.hpp"
+#include "Optimization/ResourceMaterializer.hpp"
 #include "SpirvBackend/SpirvEmitterHelpers.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
@@ -95,21 +96,6 @@ DescriptorImageShape ImageShapeForResource(const ImageResource& image) {
     fail("DescriptorBindingBuilder::Populate image resource dimension has no descriptor image shape");
 }
 
-DescriptorImageShape ImageShapeFor(const std::vector<ImageResource>& images, const std::vector<std::uint32_t>& resources) {
-    if (resources.empty()) {
-        fail("DescriptorBindingBuilder::Populate guest image binding has no resources");
-    }
-    std::optional<DescriptorImageShape> shape;
-    for (const std::uint32_t r : resources) {
-        const DescriptorImageShape current = ImageShapeForResource(images.at(r));
-        if (shape.has_value() && *shape != current) {
-            fail("DescriptorBindingBuilder::Populate guest image array elements disagree on image shape");
-        }
-        shape = current;
-    }
-    return *shape;
-}
-
 std::vector<std::uint32_t> GuestBuffersDescriptor(const std::vector<std::uint32_t>& resources, const ResourceSnapshot& snapshot) {
     std::vector<std::uint32_t> result;
     result.reserve(resources.size() * 4u);
@@ -122,30 +108,6 @@ std::vector<std::uint32_t> GuestBuffersDescriptor(const std::vector<std::uint32_
             fail("DescriptorBindingBuilder::Populate guest buffer descriptor has an invalid width");
         }
         for (std::uint32_t dword = 0; dword < 4u; dword++) {
-            result.push_back(value.dwords[dword]);
-        }
-    }
-    return result;
-}
-
-std::vector<std::uint32_t> GuestImagesDescriptor(const std::vector<std::uint32_t>& resources, const ResourceSnapshot& snapshot) {
-    std::vector<std::uint32_t> result;
-    std::uint32_t dwordCount = 0;
-    for (std::size_t i = 0; i < resources.size(); i++) {
-        const std::uint32_t r = resources[i];
-        if (r >= snapshot.images.size()) {
-            fail("DescriptorBindingBuilder::Populate guest image index is out of range");
-        }
-        const DescriptorValue& value = snapshot.images[r];
-        if (value.dwordCount == 0u) {
-            fail("DescriptorBindingBuilder::Populate guest image descriptor is empty");
-        }
-        if (i == 0u) {
-            dwordCount = value.dwordCount;
-        } else if (value.dwordCount != dwordCount) {
-            fail("DescriptorBindingBuilder::Populate guest image descriptors have inconsistent widths");
-        }
-        for (std::uint32_t dword = 0; dword < value.dwordCount; dword++) {
             result.push_back(value.dwords[dword]);
         }
     }
@@ -265,7 +227,7 @@ std::uint32_t ImageSamplerMask(const ShaderInfo& info, const std::vector<std::ui
     return mask;
 }
 
-std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads) {
+std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, const ShaderInfo& info, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads) {
     RuntimeAbi::ShaderData data{};
     data.version = RuntimeAbi::Version;
     if (snapshot.images.size() > data.images.size() || snapshot.samplers.size() > data.samplers.size()) fail("runtime resource metadata capacity exceeded");
@@ -293,12 +255,20 @@ std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, st
             const auto resource = binding.resources[element];
             auto& metadata = image ? data.images.at(resource) : data.samplers.at(resource);
             const auto& descriptor = image ? snapshot.images.at(resource) : snapshot.samplers.at(resource);
+            std::uint32_t modeIndex = 0u;
+            if (image) {
+                const auto& base = info.images.at(resource);
+                modeIndex = ResourceMaterializer::RuntimeImageMode(base, descriptor);
+                const auto mode = ResourceMaterializer::RuntimeImageModes(base).at(modeIndex);
+                if (DescriptorBindingForImage(mode) != binding.kind) continue;
+            }
             if (metadata.elementCount == 0u) {
                 metadata.binding = static_cast<std::uint32_t>(binding.kind);
                 metadata.firstElement = static_cast<std::uint32_t>(element);
                 if (descriptor.dwordCount > metadata.descriptor.size()) fail("runtime resource descriptor width exceeded");
                 std::copy_n(descriptor.dwords.begin(), descriptor.dwordCount, metadata.descriptor.begin());
                 metadata.flags = image && descriptor.dwords[0] == 0u && (descriptor.dwords[1] & 0xffu) == 0u ? 1u : 0u;
+                metadata.flags |= modeIndex << 1u;
             }
             ++metadata.elementCount;
         }
@@ -325,7 +295,7 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
 
 void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads) const {
     const IrBindingLayout& layout = allocation.layout;
-    const std::vector<std::uint32_t> shaderData = ShaderDataDwordsFor(layout, userDataBase, snapshot, partialThreads);
+    const std::vector<std::uint32_t> shaderData = ShaderDataDwordsFor(layout, info, userDataBase, snapshot, partialThreads);
     const UnnormalizedProof unnormalized = ProveUnnormalized(info, snapshot);
     const std::vector<std::uint32_t> samplerElements = SamplerElements(layout, info);
 
@@ -356,11 +326,27 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
                 else ++readOnlyHere;
             }
             break;
-        case DescriptorRole::GuestImages:
-            physical.guestDescriptor = GuestImagesDescriptor(logical.resources, snapshot);
-            physical.imageShape = ImageShapeFor(info.images, logical.resources);
+        case DescriptorRole::GuestImages: {
+            const auto modes = ResourceMaterializer::RuntimeImageModes(info.images.at(logical.resources.front()));
+            const auto shape = std::ranges::find_if(modes, [&](const ImageResource& mode) { return DescriptorBindingForImage(mode) == logical.kind; });
+            if (shape == modes.end()) fail("runtime image heap has no static image type");
+            physical.imageShape = ImageShapeForResource(*shape);
+            std::uint32_t previous = UINT32_MAX;
+            std::uint32_t mip = 0u;
             for (const std::uint32_t resource : logical.resources) {
                 const auto& image = info.images.at(resource);
+                const auto& descriptor = snapshot.images.at(resource);
+                const auto mode = ResourceMaterializer::RuntimeImageModes(image).at(ResourceMaterializer::RuntimeImageMode(image, descriptor));
+                mip = resource == previous ? mip + 1u : 0u;
+                previous = resource;
+                const auto firstMip = (descriptor.dwords[3] >> 12u) & 0xfu;
+                const auto lastMip = (descriptor.dwords[3] >> 16u) & 0xfu;
+                const bool active = DescriptorBindingForImage(mode) == logical.kind && mode.packedFormat != IrBufferFormat::Fmask8_S2_F1 && (image.mipMode != ImageMipMode::DynamicStorage || mip <= lastMip - firstMip);
+                for (std::uint32_t dword = 0u; dword < 8u; ++dword) {
+                    auto value = descriptor.dwords[dword];
+                    if (dword == 3u && (mode.conversionFormat != IrBufferFormat::Invalid || mode.depthBits)) value = (value & ~0xfffu) | ShaderImageIdentitySwizzle;
+                    physical.guestDescriptor.push_back(active ? value : 0u);
+                }
                 physical.imageWritten.push_back(image.written || image.atomic);
                 physical.imageDepthCompare.push_back(image.depthCompare);
                 physical.imageAtomic.push_back(image.atomic);
@@ -369,13 +355,14 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
                 physical.imageSamplers.push_back(ImageSamplerMask(info, samplerElements, resource));
             }
             break;
+        }
         case DescriptorRole::GuestSamplers:
             physical.guestDescriptor = GuestSamplersDescriptor(logical.resources, snapshot);
             for (std::size_t element = 0; element < logical.resources.size(); ++element) {
                 const auto& sampler = info.samplers.at(logical.resources[element]);
                 physical.samplerDepthCompare.push_back(sampler.depthCompare);
                 physical.samplerUnnormalized.push_back(unnormalized.samplers.at(logical.resources[element]));
-                if (sampler.forcePointFiltering) {
+                if ((element & 1u) != 0u) {
                     auto& filter = physical.guestDescriptor.at(element * 4u + 2u);
                     filter = PointFilteredSamplerWord(physical.guestDescriptor.at(element * 4u), filter);
                 }

@@ -857,7 +857,7 @@ private:
         for (std::uint32_t i = 0; i < m_info.images.size(); i++) {
             auto& image = m_info.images[i];
             if (image.source == source && image.resourceClass == resourceClass && image.dimension == memory.imageDimension && image.mipMode == mip && image.depthCompare == depth && image.r128 == memory.imageR128 && image.packed == memory.imagePacked) {
-                Merge(image, op, pc);
+                Merge(image, memory, op, pc);
                 return i;
             }
         }
@@ -873,12 +873,12 @@ private:
         image.depthCompare = depth;
         image.r128 = memory.imageR128;
         image.packed = memory.imagePacked;
-        Merge(image, op, pc);
+        Merge(image, memory, op, pc);
         m_info.images.push_back(image);
         return static_cast<std::uint32_t>(m_info.images.size() - 1);
     }
 
-    static void Merge(ImageResource& image, IrOpcode op, std::uint32_t pc) {
+    static void Merge(ImageResource& image, const MemoryInfo& memory, IrOpcode op, std::uint32_t pc) {
         const auto access = ImageOpcodeInfoOf(op).access;
         const bool atomic = access == ImageAccess::Atomic;
         const bool write = access == ImageAccess::Write || atomic;
@@ -891,6 +891,8 @@ private:
         image.read = image.read || !write || atomic;
         image.written = image.written || write;
         image.atomic = image.atomic || atomic;
+        image.fmaskCompatible = image.fmaskCompatible && op == IrOpcode::ImageRead && memory.dataBits == 32u;
+        image.depthBitsCompatible = image.depthBitsCompatible && memory.dataBits == 32u;
     }
 
     std::uint32_t AddSampler(std::uint32_t source, std::uint32_t pc) {

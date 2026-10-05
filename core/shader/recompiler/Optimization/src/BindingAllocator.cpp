@@ -1,4 +1,5 @@
 #include "Optimization/BindingAllocator.hpp"
+#include "Optimization/ResourceMaterializer.hpp"
 #include <algorithm>
 #include <array>
 #include <stdexcept>
@@ -110,19 +111,15 @@ BindingAllocationResult BindingAllocator::Allocate(IrProgram& program, const Bin
 
     std::array<std::vector<std::uint32_t>, ImageBindingCount> imageGroups;
     const auto place = [&](std::uint32_t i) {
-        const DescriptorBindingKind kind = DescriptorBindingForImage(info.images[i]);
-        const std::uint32_t group = ImageBindingIndex(kind);
-        if (group >= imageGroups.size()) {
-            fail("shader binding layout failed: image " + std::to_string(i) + " has an unmapped binding class");
-        }
-        std::vector<std::uint32_t>& resources = imageGroups[group];
         const bool dynamic = info.images[i].mipMode == ImageMipMode::DynamicStorage;
-        const std::uint32_t count = dynamic ? info.images[i].mipCount : 1u;
-        if (count == 0u || (!dynamic && info.images[i].mipCount != 1u)) {
-            fail("shader binding layout failed: image " + std::to_string(i) + " has an invalid specialized mip count " +
-                 std::to_string(info.images[i].mipCount));
+        const std::uint32_t count = dynamic ? RuntimeAbi::StorageHeapCapacity : 1u;
+        std::array<bool, ImageBindingCount> placed{};
+        for (const auto& mode : ResourceMaterializer::RuntimeImageModes(info.images[i])) {
+            const auto group = ImageBindingIndex(DescriptorBindingForImage(mode));
+            if (placed.at(group)) continue;
+            placed[group] = true;
+            imageGroups[group].insert(imageGroups[group].end(), count, i);
         }
-        resources.insert(resources.end(), count, i);
     };
     // A bindless table's slots follow their root as consecutive elements: the SPIR-V indexes the
     // binding with element(root) + slot.
@@ -150,9 +147,10 @@ BindingAllocationResult BindingAllocator::Allocate(IrProgram& program, const Bin
     }
 
     if (!info.samplers.empty()) {
-        std::vector<std::uint32_t> resources(info.samplers.size());
+        if (info.samplers.size() > RuntimeAbi::SamplerHeapCapacity / 2u) fail("shader sampler pairs exceed runtime heap capacity");
+        std::vector<std::uint32_t> resources(info.samplers.size() * 2u);
         for (std::uint32_t i = 0; i < resources.size(); i++) {
-            resources[i] = i;
+            resources[i] = i / 2u;
         }
         addBinding(next, DescriptorBindingKind::Samplers, std::move(resources));
     }
