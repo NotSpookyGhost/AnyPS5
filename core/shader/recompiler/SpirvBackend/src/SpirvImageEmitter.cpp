@@ -1031,10 +1031,6 @@ void EmitGatherOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, con
     ctx.Define(access.inst, TableResult(ctx, access, ResultVector(ctx, access, UnpackImageGather(ctx, access, gathered), resultNumericClass, false, true)));
 }
 
-// The bound slot of a bindless table for the runtime key: a binary search over the (key, slot)
-// pairs the materializer appended to the flattened SRT. A key the mapping lacks (past the table,
-// or a null or unusable entry) selects slot 0 and reports unmapped: its result is zeroed, as a
-// null T# samples on hardware.
 TableSelection EmitIndirectImageSelector(SpirvValueEmitContext& ctx, const ImageResource& image, std::uint32_t key) {
     auto& state = ctx.state;
     const auto loadMapping = [&](std::uint32_t index) {
@@ -1047,7 +1043,7 @@ TableSelection EmitIndirectImageSelector(SpirvValueEmitContext& ctx, const Image
     const auto mapping = ConstantU32(state, image.indirectMappingOffset);
     auto low = ConstantU32(state, 0u);
     auto high = loadMapping(mapping);
-    auto selected = ConstantU32(state, 0u);
+    auto selected = ConstantU32(state, image.indirectRoot);
     auto mapped = ConstantBool(state, false);
     for (std::uint32_t iteration = 0; iteration < image.indirectSearchIterations; iteration++) {
         const auto active = Binary(state, spv::OpULessThan, TypeBool(state), low, high);
@@ -1363,7 +1359,7 @@ void EmitImage(SpirvValueEmitContext& ctx, const IrValue& inst) {
     state.runtimeImageMetadata = ConstantU32(state, memory.resource);
     const auto table = TableSlot(ctx, inst, memory, base);
     if (table.slot != 0u) {
-        for (std::uint32_t slot = 0u; slot < base.indirectResources.size(); ++slot) state.runtimeImageMetadata = Select(state, TypeU32(state), Binary(state, spv::OpIEqual, TypeBool(state), table.slot, ConstantU32(state, slot)), ConstantU32(state, base.indirectResources[slot]), state.runtimeImageMetadata);
+        state.runtimeImageMetadata = table.slot;
     }
     const auto selector = Binary(state, spv::OpShiftRightLogical, TypeU32(state), RuntimeImageDword(state, memory.resource, offsetof(RuntimeAbi::ResourceMetadata, flags) / sizeof(std::uint32_t)), ConstantU32(state, 1u));
     const bool returnsValue = inst.Opcode() != IrOpcode::ImageWrite;

@@ -884,6 +884,32 @@ double ShaderResources::phase(BuildPhase which) {
     return ms;
 }
 
+namespace {
+
+void ValidateRuntimeResources(const CompiledShader& shader) {
+    Require(shader.program != nullptr, "missing compiled shader");
+    const auto& descriptors = shader.program->bindings;
+    for (const auto& dataBinding : descriptors) {
+        if (dataBinding.role != ShaderRecompiler::DescriptorRole::ShaderData) continue;
+        Require(dataBinding.guestDescriptor.size() == ShaderRecompiler::RuntimeAbi::ShaderDataDwords, "invalid runtime resource metadata size");
+        ShaderRecompiler::RuntimeAbi::ShaderData data{};
+        std::memcpy(&data, dataBinding.guestDescriptor.data(), sizeof(data));
+        ShaderRecompiler::RuntimeAbi::RequireVersion(data.version);
+        Require(data.imageCount <= data.images.size() && data.samplerCount <= data.samplers.size(), "runtime resource metadata capacity exceeded");
+        const auto stageBase = dataBinding.binding - dataBinding.binding % static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count);
+        const auto validate = [&](const ShaderRecompiler::RuntimeAbi::ResourceMetadata& metadata, ShaderRecompiler::DescriptorRole role) {
+            Require(metadata.binding < static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count), "invalid runtime heap binding");
+            const auto found = std::ranges::find_if(descriptors, [&](const ShaderRecompiler::DescriptorBinding& binding) { return binding.binding == stageBase + metadata.binding && binding.role == role; });
+            Require(found != descriptors.end(), "runtime metadata references an unbound heap");
+            Require(metadata.elementCount != 0u && metadata.firstElement < found->count && metadata.elementCount <= found->count - metadata.firstElement, "runtime metadata exceeds its bound heap");
+        };
+        for (std::uint32_t i = 0u; i < data.imageCount; ++i) validate(data.images[i], ShaderRecompiler::DescriptorRole::GuestImages);
+        for (std::uint32_t i = 0u; i < data.samplerCount; ++i) validate(data.samplers[i], ShaderRecompiler::DescriptorRole::GuestSamplers);
+    }
+}
+
+}
+
 void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes) {
     const auto stageStart = std::chrono::steady_clock::now();
     phaseStart = stageStart;
@@ -893,8 +919,10 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
     }
     try {
         Require(!shaders.empty() && context.limits.maxBoundDescriptorSets >= 1, "shader descriptor set exceeds device limits");
+        if (shaders.size() == 1u) refreshResourceKey = ContentKey(shaders.front(), false, true);
         std::set<std::uint32_t> occupied;
         for (const auto& shader : shaders) {
+            ValidateRuntimeResources(shader);
             Require(shader.program != nullptr, "missing compiled shader");
             ShaderRecompiler::RuntimeAbi::RequireVersion(shader.program->runtimeAbiVersion);
             const VkShaderStageFlags flags = VulkanStage(shader.stage);
@@ -2356,6 +2384,8 @@ bool ShaderResources::DataWordsDiffer(const CompiledShader& shader) const {
 
 bool ShaderResources::RefreshData(VkCommandBuffer commands, const CompiledShader& shader, Recorder* recorder) {
     Require(shader.program != nullptr, "missing compiled shader");
+    Require(!refreshResourceKey.empty() && refreshResourceKey == ContentKey(shader, false, true), "runtime data refresh cannot replace bound resources");
+    ValidateRuntimeResources(shader);
     const auto& program = *shader.program;
     Require(program.bindings.size() == bindings.size(), "template bindings disagree with the shader");
     bool recorded = false;

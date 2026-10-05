@@ -242,7 +242,8 @@ void verifyBindlessTable() {
     const std::vector<std::uint32_t> wholeCode{0xf4080100u, 0xfa000000u, 0xf4080200u, 0xfa000010u, 0xf4080300u, 0xfa000020u, 0xf4080700u, 0xfa000030u, 0x7e200500u, 0x8f108510u, 0xf42c0502u, 0x20000000u, 0xf09c0f08u, 0x00450000u, 0xe0700000u, 0x80070000u, 0xbf810000u};
     const auto srtAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(srt.data()));
     const std::array<std::uint32_t, 2> userData{static_cast<std::uint32_t>(srtAddress), static_cast<std::uint32_t>(srtAddress >> 32u)};
-    const std::array<std::uint32_t, 1> capabilities{29u};
+    const std::array<std::uint32_t, 4> capabilities{29u, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
     // A wave64 workgroup on a 32-wide host is held by one subgroup (two lanes per invocation).
     const auto makeRequest = [&](const std::vector<std::uint32_t>& code) {
         RecompileRequest request{};
@@ -255,6 +256,8 @@ void verifyBindlessTable() {
         request.target.spirvVersion = 0x00010300u;
         request.target.subgroupSize = 32;
         request.target.supportedCapabilities = capabilities;
+        request.target.supportedExtensions = extensions;
+        request.target.bdaAbiVersion = BdaAbi::Version;
         request.target.fragmentShaderBarycentricEnabled = false;
         request.layout.pushConstantSizeBytes = 128;
         return request;
@@ -356,8 +359,8 @@ void verifyBindlessTable() {
     AgcDriver::ShaderMemory splitMemory({});
     const auto splitCapture = splitMemory.Capture(split);
     expectFailure([&] { static_cast<void>(Recompile(split, *splitCapture)); }, "not uniform over the workgroup", "bindless: a split wave indexed the image array as uniform");
-    const std::array<std::uint32_t, 3> indexingCapabilities{29u, 5301u, 5307u};
-    const std::array<std::string_view, 1> indexingExtensions{"SPV_EXT_descriptor_indexing"};
+    const std::array<std::uint32_t, 6> indexingCapabilities{29u, 5301u, 5307u, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    const std::array<std::string_view, 3> indexingExtensions{"SPV_EXT_descriptor_indexing", "SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
     split.target.supportedCapabilities = indexingCapabilities;
     split.target.supportedExtensions = indexingExtensions;
     AgcDriver::ShaderMemory indexingMemory({});
@@ -403,6 +406,23 @@ void verifyBindlessTable() {
     fillSrt(100u);
     AgcDriver::ShaderMemory wideMemory({});
     expectFailure([&] { static_cast<void>(wideMemory.Capture(whole)); }, "bindless image table has 100 entries", "bindless: a wide table was bound");
+    fillSrt(4u);
+    const auto savedHeap = heap;
+    heap = {};
+    AgcDriver::ShaderMemory emptyMemory({});
+    const auto emptyCapture = emptyMemory.Capture(request);
+    require(mappingOf(emptyCapture->snapshot).front() == 0u, "bindless: an empty table has mapped keys");
+    request.context.memory = emptyMemory.Regions();
+    require(Recompile(request, *emptyCapture)->variantId == compiled->variantId, "bindless: an empty table changed the artifact");
+    heap = savedHeap;
+    heap[0][3] &= 0x0fffffffu;
+    AgcDriver::ShaderMemory invalidMemory({});
+    expectFailure([&] { static_cast<void>(invalidMemory.Capture(request)); }, "invalid descriptor", "bindless: an invalid T# was accepted");
+    heap = savedHeap;
+    srt[1] &= 0xffffu;
+    srt[2] = 127u;
+    AgcDriver::ShaderMemory partialMemory({});
+    expectFailure([&] { static_cast<void>(partialMemory.Capture(request)); }, "partial descriptor", "bindless: a partial heap descriptor was accepted");
     fillSrt(4u);
 }
 
@@ -1526,9 +1546,15 @@ void verifyFunctionLdsBound() {
     require(unsized == FunctionLdsDwordLimit, "function LDS: an access without a known width must keep the full array");
 }
 
-int main() {
+int main(int argc, char** argv) {
     try {
         using namespace ShaderRecompiler;
+        if (argc == 2 && std::string_view(argv[1]) == "--bindless") {
+            verifyBindlessTable();
+            std::cout << "Bindless mapping, indexing capabilities and strict validation passed\n";
+            return 0;
+        }
+        require(argc == 1, "unknown shader memory test arguments");
         verifyRegisterSources();
         verifyEvaluatedValues();
         verifyPureFlatSlots();

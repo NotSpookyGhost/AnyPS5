@@ -202,8 +202,6 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
 
 constexpr std::uint32_t TableEntryBytes = 32;
 
-// Bindless image tables: the most material records mode M reads to enumerate a table's keys
-// (APS5_BINDLESS_MATERIAL_SCAN, default 256); beyond it the whole table is bound instead.
 std::uint32_t MaterialScanLimit() {
     static const std::uint32_t limit = [] {
         const char* text = std::getenv("APS5_BINDLESS_MATERIAL_SCAN");
@@ -266,10 +264,6 @@ void reportBindless() {
         static_cast<unsigned long long>(rejected[0]), static_cast<unsigned long long>(rejected[1]), static_cast<unsigned long long>(rejected[2]), static_cast<unsigned long long>(rejected[3]), static_cast<unsigned long long>(rejected[4]), static_cast<unsigned long long>(rejected[5]));
 }
 
-// A bindless image table's bound slots and its (key, slot) mapping, keys ascending. Slots the
-// mapping does not name (past the keys, or an entry that is null, invalid or of another shape)
-// hold a copy of the first usable entry: a key the mapping lacks samples zeros in the shader, as
-// a null T# does on hardware. Empty when the image is no table root.
 struct TableResolution {
     std::vector<DescriptorValue> slots;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> mapping;
@@ -312,6 +306,8 @@ void resolveTableImage(const IrResourcePlan& plan, std::uint32_t imageIndex, con
     walker.EvaluateDescriptorSource(plan, table.heapSource, runtime, heapValue);
     const ShaderBufferResource heap = decodeBufferDescriptor(heapValue);
     const std::uint64_t heapSize = heap.GetSize();
+    if (heap.Type() != 0u || heap.Base48() > std::numeric_limits<std::uint64_t>::max() - heapSize) throw std::runtime_error("bindless heap buffer is invalid");
+    if (heapSize != 0u && (heapSize < table.entryOffset || (heapSize - table.entryOffset) % TableEntryBytes != 0u)) throw std::runtime_error("bindless heap contains a partial descriptor");
     const auto entries = heapSize > table.entryOffset ? static_cast<std::uint32_t>(std::min<std::uint64_t>((heapSize - table.entryOffset) / TableEntryBytes, std::numeric_limits<std::uint32_t>::max())) : 0u;
     const auto readWord = [&](std::uint64_t address, std::uint32_t& word) {
         if (!runtime.readMemory(runtime.userContext, address, &word)) {
@@ -325,18 +321,21 @@ void resolveTableImage(const IrResourcePlan& plan, std::uint32_t imageIndex, con
     std::uint32_t materialEntries = 0;
     std::uint64_t materialBase = 0;
     std::uint32_t outOfRange = 0;
-    if (table.hasMaterial && table.selectorStride != 0u) {
+    if (table.hasMaterial) {
+        if (table.selectorStride < sizeof(std::uint32_t) || table.selectorOffset > table.selectorStride - sizeof(std::uint32_t)) throw std::runtime_error("bindless material selector is outside its record");
         DescriptorValue materialValue;
         walker.EvaluateDescriptorSource(plan, table.materialSource, runtime, materialValue);
         const ShaderBufferResource material = decodeBufferDescriptor(materialValue);
         materialBase = material.Base48();
         const std::uint64_t materialSize = material.GetSize();
+        if (material.Type() != 0u || materialSize % table.selectorStride != 0u) throw std::runtime_error("bindless material buffer has an invalid layout");
         materialEntries = static_cast<std::uint32_t>(std::min<std::uint64_t>(materialSize / table.selectorStride, std::numeric_limits<std::uint32_t>::max()));
+        if (materialSize / table.selectorStride > MaterialScanLimit()) rejectTable(BindlessRejection::MaterialScan, "bindless material scan capacity exceeded");
         if (materialEntries <= MaterialScanLimit()) {
             materialMode = true;
             for (std::uint32_t record = 0; record < materialEntries; record++) {
                 const std::uint64_t offset = static_cast<std::uint64_t>(record) * table.selectorStride + table.selectorOffset;
-                if (offset + sizeof(std::uint32_t) > materialSize) break;
+                if (offset + sizeof(std::uint32_t) > materialSize) throw std::runtime_error("bindless material selector exceeds its buffer");
                 std::uint32_t key = 0;
                 readWord(materialBase + offset, key);
                 if (key >= entries) {
@@ -360,10 +359,6 @@ void resolveTableImage(const IrResourcePlan& plan, std::uint32_t imageIndex, con
         for (std::uint32_t key = 0; key < entries; key++) keys[key] = key;
     }
     counters.outOfRange.fetch_add(outOfRange, std::memory_order_relaxed);
-    if (keys.empty()) {
-        rejectTable(BindlessRejection::NoEntry, "bindless image table selects no entry");
-    }
-
     const std::uint64_t heapBase = heap.Base48();
     std::vector<DescriptorValue> candidates(keys.size());
     std::vector<std::uint8_t> valid(keys.size(), 0u);
@@ -434,18 +429,17 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
 
     snapshot.images.resize(plan.info.images.size());
     tables.assign(plan.info.images.size(), {});
-    std::uint32_t activeTables = 0;
+    std::uint32_t tableCount = 0;
     for (std::uint32_t i = 0; i < plan.info.images.size(); i++) {
         const auto& image = plan.info.images[i];
         if (image.source >= plan.descriptorSources.size()) {
             throw std::runtime_error("image resource references an unknown descriptor source");
         }
-        const bool active = image.source >= activeSources.size() || activeSources[image.source] != 0u;
-        if (plan.descriptorSources[image.source].indirectImage.has_value() && active) activeTables++;
+        if (plan.descriptorSources[image.source].indirectImage.has_value()) tableCount++;
     }
     const auto tableSlots = ResourceMaterializer::BindlessSlots();
-    if (activeTables != 0u && plan.info.images.size() + static_cast<std::size_t>(tableSlots - 1u) * activeTables > ShaderInfo::MaxImages) {
-        rejectTable(BindlessRejection::ImageSlots, "bindless image tables need " + std::to_string(plan.info.images.size() + static_cast<std::size_t>(tableSlots - 1u) * activeTables) + " image slots, limit " + std::to_string(ShaderInfo::MaxImages));
+    if (tableCount != 0u && plan.info.images.size() + static_cast<std::size_t>(tableSlots - 1u) * tableCount > ShaderInfo::MaxImages) {
+        rejectTable(BindlessRejection::ImageSlots, "bindless image tables need " + std::to_string(plan.info.images.size() + static_cast<std::size_t>(tableSlots - 1u) * tableCount) + " image slots, limit " + std::to_string(ShaderInfo::MaxImages));
     }
     for (std::uint32_t i = 0; i < plan.info.images.size(); i++) {
         const auto& image = plan.info.images[i];
@@ -453,6 +447,7 @@ void materializeSnapshot(const IrResourcePlan& plan, const SrtRuntime& runtime, 
         if (source.indirectImage.has_value()) {
             if (image.source < activeSources.size() && activeSources[image.source] == 0u) {
                 snapshot.images[i].dwordCount = 8u;
+                tables[i].slots.assign(tableSlots, snapshot.images[i]);
                 continue;
             }
             resolveTableImage(plan, i, *source.indirectImage, runtime, walker, snapshot.images[i], tables[i]);
@@ -587,7 +582,7 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
         snapshot.flattenedSrt.push_back(static_cast<std::uint32_t>(table.mapping.size()));
         for (const auto& [key, slot] : table.mapping) {
             snapshot.flattenedSrt.push_back(key);
-            snapshot.flattenedSrt.push_back(slot);
+            snapshot.flattenedSrt.push_back(slot == 0u ? i : static_cast<std::uint32_t>(snapshot.images.size()) + slot - 1u);
         }
         snapshot.flattenedSrt.resize(mappingOffset + 1u + 2u * table.slots.size(), 0u);
         auto root = result.images[i];
@@ -892,12 +887,7 @@ std::uint64_t ResourceMaterializer::SpecializationNanoseconds() {
 }
 
 std::uint32_t ResourceMaterializer::BindlessSlots() {
-    static const std::uint32_t slots = [] {
-        const char* text = std::getenv("APS5_BINDLESS_SLOTS");
-        const auto value = text != nullptr ? std::strtoul(text, nullptr, 0) : 16ul;
-        return static_cast<std::uint32_t>(std::clamp<unsigned long>(value, 1ul, 48ul));
-    }();
-    return slots;
+    return RuntimeAbi::SampledHeapCapacity;
 }
 
 void ResourceMaterializer::CountBindlessRejection(BindlessRejection reason) {

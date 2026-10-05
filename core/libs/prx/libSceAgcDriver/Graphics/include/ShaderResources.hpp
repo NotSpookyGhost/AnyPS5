@@ -435,6 +435,7 @@ private:
     // still to look up (index into `bindings`; the DescriptorBinding lives in the compiled shader),
     // the descriptor counts the set was sized for, and the compute stage of a deferred build.
     std::vector<Binding> bindings;
+    std::vector<std::uint32_t> refreshResourceKey;
     struct DeferredImages {
         const ShaderRecompiler::DescriptorBinding* binding;
         std::size_t index;
