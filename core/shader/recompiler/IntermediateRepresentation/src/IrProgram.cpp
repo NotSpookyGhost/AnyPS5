@@ -827,7 +827,7 @@ PositionExportComponent DecodePositionExportComponent(std::uint32_t control, std
 
 std::uint32_t NativeBinding(IrShaderStage stage, DescriptorBindingKind kind) {
     const std::uint32_t group = stage == IrShaderStage::Pixel ? 1u : stage == IrShaderStage::TessellationControl ? 2u : stage == IrShaderStage::TessellationEvaluation ? 3u : 0u;
-    return static_cast<std::uint32_t>(kind) + group * static_cast<std::uint32_t>(DescriptorBindingKind::Count);
+    return RuntimeAbi::BindingNumber(static_cast<RuntimeAbi::Stage>(group), kind);
 }
 
 ImageResourceClass ImageBindingResourceClass(DescriptorBindingKind kind) {

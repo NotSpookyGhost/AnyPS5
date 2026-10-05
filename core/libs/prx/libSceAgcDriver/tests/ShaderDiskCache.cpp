@@ -48,6 +48,7 @@ void requireSameArtifact(const CompiledShaderArtifact& left, const CompiledShade
     const std::string prefix = std::string(what) + ": ";
     require(left.spirv.Words() == right.spirv.Words(), prefix + "SPIR-V differs");
     require(left.bdaAbiVersion == right.bdaAbiVersion, prefix + "BDA ABI version differs");
+    require(left.runtimeAbiVersion == right.runtimeAbiVersion, prefix + "runtime ABI version differs");
     require(left.memoryOffsetDword == right.memoryOffsetDword, prefix + "memory offset differs");
     require(left.hostSubgroupSize == right.hostSubgroupSize, prefix + "host subgroup size differs");
     require(left.vertexInputs == right.vertexInputs, prefix + "vertex inputs differ");
@@ -266,6 +267,11 @@ void verifyResultRoundTrip() {
     ShaderDiskCache::EncodeResult(RecompileResult{}, bytes);
     require(ShaderDiskCache::DecodeResult(bytes, decoded), "an empty result does not decode");
     requireSameResult(RecompileResult{}, decoded, "empty result round trip");
+    auto incompatible = result;
+    incompatible.runtimeAbiVersion = RuntimeAbi::Version + 1u;
+    bytes.clear();
+    ShaderDiskCache::EncodeResult(incompatible, bytes);
+    require(!ShaderDiskCache::DecodeResult(bytes, decoded), "an incompatible runtime ABI result decodes");
 }
 
 void verifyEntryRoundTrip() {
@@ -296,8 +302,12 @@ void verifyEntryRoundTrip() {
     otherKey.back() ^= std::byte{1};
     require(ShaderDiskCache::DecodeEntry(file, otherKey, decoded) == ShaderDiskCache::LoadStatus::KeyMismatch, "an entry for another key loads");
     auto previousVersion = file;
-    previousVersion[4] = std::byte{4};
+    previousVersion[4] = static_cast<std::byte>(ShaderDiskCache::FormatVersion - 1u);
     require(ShaderDiskCache::DecodeEntry(previousVersion, key, decoded) == ShaderDiskCache::LoadStatus::Rejected, "an entry with the previous format version loads");
+    auto incompatible = variant;
+    incompatible.artifact.runtimeAbiVersion = RuntimeAbi::Version + 1u;
+    const auto incompatibleFile = ShaderDiskCache::EncodeEntry(key, incompatible);
+    require(ShaderDiskCache::DecodeEntry(incompatibleFile, key, decoded) == ShaderDiskCache::LoadStatus::Rejected, "an entry with an incompatible runtime ABI loads");
 }
 
 void verifyArtifactStorageIsolation() {

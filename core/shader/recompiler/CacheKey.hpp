@@ -13,6 +13,7 @@ class RecompileCacheKey {
 public:
     static void Build(const RecompileRequest& request, std::vector<std::uint64_t>& key) {
         key.clear();
+        append(key, RuntimeAbi::Version);
         append(key, request.shader.stage);
         // The code enters as a hash rather than word by word: the key is built, hashed and compared
         // on every dispatch and draw. The cache verifies a match against the code it stored.
@@ -44,6 +45,7 @@ public:
         struct ContextKeyStorage {};
         auto& key = HostThreadLocal<std::vector<std::uint64_t>, ContextKeyStorage>();
         key.clear();
+        append(key, RuntimeAbi::Version);
         append(key, request.shader.stage);
         append(key, request.context.waveSize);
         append(key, request.context.userDataBaseRegister);

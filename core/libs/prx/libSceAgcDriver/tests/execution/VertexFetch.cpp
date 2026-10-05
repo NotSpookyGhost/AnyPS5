@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <string>
 
 namespace {
 
@@ -21,6 +22,22 @@ constexpr std::array<std::uint32_t, 11> vertexCode{0xf4080100u, 0xfa000000u, 0x4
 constexpr std::array<std::uint32_t, 5> pixelCode{0x7e0002f2u, 0x7e020280u, 0xf800180fu, 0x00010100u, 0xbf810000u};
 
 void Run(AgcDriver::VulkanDevice& device) {
+    ShaderRecompiler::RecompileResult incompatible;
+    incompatible.runtimeAbiVersion = ShaderRecompiler::RuntimeAbi::Version + 1u;
+    const auto rejectAbi = [](auto action) {
+        try {
+            action();
+        } catch (const std::runtime_error& error) {
+            Require(std::string(error.what()).find("incompatible version") != std::string::npos, "unexpected runtime ABI validation error");
+            return;
+        }
+        throw std::runtime_error("driver accepted an incompatible shader runtime ABI");
+    };
+    rejectAbi([&] { device.PrepareDispatch(incompatible, {}); });
+    rejectAbi([&] { device.Dispatch(incompatible, 1u, 1u, 1u); });
+    rejectAbi([&] { device.DispatchIndirect(incompatible, 0u); });
+    const std::array<AgcDriver::Graphics::CompiledShader, 1> incompatibleShaders{{{ShaderStage::Vertex, &incompatible, 0u}}};
+    rejectAbi([&] { device.Draw({}, {}, incompatibleShaders); });
     std::array<std::uint32_t, 4> descriptor{};
     const auto tableAddress = reinterpret_cast<std::uintptr_t>(descriptor.data());
     std::array<std::uint32_t, 4> userData{static_cast<std::uint32_t>(tableAddress), static_cast<std::uint32_t>(tableAddress >> 32u), 1u, 1u};

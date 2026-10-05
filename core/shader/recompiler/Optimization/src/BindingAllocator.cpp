@@ -73,7 +73,7 @@ BindingAllocationResult BindingAllocator::Allocate(IrProgram& program, const Bin
         fail(metadata.shaderInfoComplete ? "shader binding layout failed: binding layout already allocated"
                                           : "shader binding layout failed: shader info is not ready");
     }
-    if (layout.descriptorSet != 0u) {
+    if (layout.descriptorSet != RuntimeAbi::DescriptorSet) {
         fail("shader binding layout failed: descriptor set must be 0");
     }
     if (layout.firstBinding != 0u) {

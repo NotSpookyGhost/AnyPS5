@@ -63,9 +63,9 @@ std::filesystem::path ShaderCacheDirectory() {
 namespace ShaderRecompiler::ShaderDiskCache {
 
 #if defined(__linux__) && defined(__x86_64__) && defined(__GLIBCXX__)
-static_assert(sizeof(CompiledShaderArtifact) == 120, "CompiledShaderArtifact changed: update the artifact encoder");
+static_assert(sizeof(CompiledShaderArtifact) == 128, "CompiledShaderArtifact changed: update the artifact encoder");
 static_assert(sizeof(ShaderInvocation) == 72, "ShaderInvocation changed: update the invocation encoder");
-static_assert(sizeof(RecompileResult) == 200, "RecompileResult changed: update EncodeResult and DecodeResult");
+static_assert(sizeof(RecompileResult) == 208, "RecompileResult changed: update EncodeResult and DecodeResult");
 static_assert(sizeof(DescriptorBinding) == 448, "DescriptorBinding changed: update the binding encoder");
 static_assert(sizeof(VertexAttribute) == 28, "VertexAttribute changed: update the attribute encoder");
 static_assert(sizeof(VertexInput) == 12, "VertexInput changed: update the vertex input encoder");
@@ -284,6 +284,7 @@ void decodeBinding(Reader& reader, DescriptorBinding& binding) {
 }
 
 void encodeArtifact(Writer& writer, const CompiledShaderArtifact& result) {
+    writer.Value(result.runtimeAbiVersion);
     writer.Values(std::span<const std::uint32_t>(result.spirv.Words()));
     writer.Value(result.bdaAbiVersion);
     writer.Value(result.memoryOffsetDword);
@@ -310,6 +311,7 @@ void encodeArtifact(Writer& writer, const CompiledShaderArtifact& result) {
 }
 
 void decodeArtifact(Reader& reader, CompiledShaderArtifact& result) {
+    reader.Value(result.runtimeAbiVersion);
     std::vector<std::uint32_t> words;
     reader.Values(words);
     result.spirv = std::move(words);
@@ -847,7 +849,7 @@ bool DecodeResult(std::span<const std::byte> bytes, RecompileResult& result) {
     decodeArtifact(reader, result);
     decodeInvocation(reader, result);
     result.cacheHit = false;
-    return reader.Done();
+    return reader.Done() && result.runtimeAbiVersion == RuntimeAbi::Version;
 }
 
 std::vector<std::byte> EncodeEntry(std::span<const std::byte> key, const CompiledVariant& variant) {
@@ -882,7 +884,7 @@ LoadStatus DecodeEntry(std::span<const std::byte> file, std::span<const std::byt
     decodeArtifact(reader, decoded.artifact);
     decodeInfo(reader, decoded.info);
     decodeAllocation(reader, decoded.bindings);
-    if (!reader.Done()) return LoadStatus::Rejected;
+    if (!reader.Done() || decoded.artifact.runtimeAbiVersion != RuntimeAbi::Version) return LoadStatus::Rejected;
     variant.info = std::move(decoded.info);
     variant.bindings = std::move(decoded.bindings);
     variant.artifact = std::move(decoded.artifact);
