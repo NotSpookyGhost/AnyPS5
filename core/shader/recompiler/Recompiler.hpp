@@ -396,17 +396,21 @@ private:
     std::shared_ptr<std::vector<std::uint32_t>> words;
 };
 
-struct RecompileResult {
+struct VertexInput {
+    std::uint32_t location;
+    std::uint32_t components;
+    std::uint32_t fetchIndex;
+
+    bool operator==(const VertexInput& other) const = default;
+};
+
+struct CompiledShaderArtifact {
     SharedSpirv spirv;
-    std::vector<DescriptorBinding> bindings;
-    std::vector<std::byte> pushConstants;
     std::uint32_t memoryOffsetDword = 0;
     std::uint32_t bdaAbiVersion = 0;
-    std::vector<VertexAttribute> vertexAttributes;
+    std::vector<VertexInput> vertexInputs;
     std::int32_t vertexOffsetSgpr = -1;
     std::int32_t instanceOffsetSgpr = -1;
-    // The offset SGPR is also read elsewhere in the program (so a value folded into the draw's
-    // first vertex / instance cannot stand in for it), or two SGPRs were added (the SGPR is -1).
     bool vertexOffsetShared = false;
     bool instanceOffsetShared = false;
     bool vertexOffsetConflict = false;
@@ -414,10 +418,17 @@ struct RecompileResult {
     std::uint32_t hostSubgroupSize = 0;
     std::vector<std::uint32_t> parameterExports;
     std::vector<FragmentParameter> fragmentParameters;
-    bool cacheHit = false;
-    // Identifies the compiled variant the result came from: equal ids mean identical SPIR-V and
-    // bindings, so drivers can reuse pipeline objects. Zero when unknown.
     std::uint64_t variantId = 0;
+};
+
+struct ShaderInvocation {
+    std::vector<DescriptorBinding> bindings;
+    std::vector<std::byte> pushConstants;
+    std::vector<VertexAttribute> vertexAttributes;
+};
+
+struct RecompileResult : CompiledShaderArtifact, ShaderInvocation {
+    bool cacheHit = false;
 };
 
 [[nodiscard]] RecompileResult Recompile(const RecompileRequest& request);

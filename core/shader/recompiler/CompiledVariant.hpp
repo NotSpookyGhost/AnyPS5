@@ -12,8 +12,8 @@ struct CompiledVariant {
     ResourceSpecialization specialization;
     BindingLayout layout;
     CompiledShaderInfo info;
-    BindingAllocationResult bindings;
-    RecompileResult result;
+    CompiledBindingLayout bindings;
+    CompiledShaderArtifact artifact;
 };
 
 }

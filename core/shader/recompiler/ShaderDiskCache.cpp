@@ -63,9 +63,12 @@ std::filesystem::path ShaderCacheDirectory() {
 namespace ShaderRecompiler::ShaderDiskCache {
 
 #if defined(__linux__) && defined(__x86_64__) && defined(__GLIBCXX__)
-static_assert(sizeof(RecompileResult) == 176, "RecompileResult changed: update EncodeResult and DecodeResult");
+static_assert(sizeof(CompiledShaderArtifact) == 120, "CompiledShaderArtifact changed: update the artifact encoder");
+static_assert(sizeof(ShaderInvocation) == 72, "ShaderInvocation changed: update the invocation encoder");
+static_assert(sizeof(RecompileResult) == 200, "RecompileResult changed: update EncodeResult and DecodeResult");
 static_assert(sizeof(DescriptorBinding) == 448, "DescriptorBinding changed: update the binding encoder");
 static_assert(sizeof(VertexAttribute) == 28, "VertexAttribute changed: update the attribute encoder");
+static_assert(sizeof(VertexInput) == 12, "VertexInput changed: update the vertex input encoder");
 static_assert(sizeof(FragmentParameter) == 12, "FragmentParameter changed: update the parameter encoder");
 static_assert(sizeof(CompiledShaderInfo) == 304, "CompiledShaderInfo changed: update the info encoder");
 static_assert(sizeof(ShaderInfo) == 200, "ShaderInfo changed: update the info encoder");
@@ -78,6 +81,7 @@ static_assert(sizeof(StageOutput) == 48, "StageOutput changed: update the info e
 static_assert(sizeof(IrBindingLayout) == 64, "IrBindingLayout changed: update the layout encoder");
 static_assert(sizeof(IrDescriptorBinding) == 32, "IrDescriptorBinding changed: update the layout encoder");
 static_assert(sizeof(BindingAllocationResult) == 120, "BindingAllocationResult changed: update the allocation encoder");
+static_assert(sizeof(CompiledBindingLayout) == 72, "CompiledBindingLayout changed: update the allocation encoder");
 static_assert(sizeof(ResourceSpecialization) == 72, "ResourceSpecialization changed: update BuildKey");
 static_assert(sizeof(ResourceSpecialization::Buffer) == 16, "ResourceSpecialization::Buffer changed: update BuildKey");
 static_assert(sizeof(ResourceSpecialization::Image) == 48, "ResourceSpecialization::Image changed: update BuildKey");
@@ -280,17 +284,13 @@ void decodeBinding(Reader& reader, DescriptorBinding& binding) {
     reader.Values(binding.imageSamplers);
 }
 
-void encodeResult(Writer& writer, const RecompileResult& result) {
+void encodeArtifact(Writer& writer, const CompiledShaderArtifact& result) {
     writer.Values(std::span<const std::uint32_t>(result.spirv.Words()));
-    writer.List(result.bindings, encodeBinding);
-    writer.Value<std::uint64_t>(result.pushConstants.size());
-    for (const auto byte : result.pushConstants) writer.Value(static_cast<std::uint8_t>(byte));
     writer.Value(result.bdaAbiVersion);
     writer.Value(result.memoryOffsetDword);
-    writer.List(result.vertexAttributes, [](Writer& out, const VertexAttribute& attribute) {
+    writer.List(result.vertexInputs, [](Writer& out, const VertexInput& attribute) {
         out.Value(attribute.location);
         out.Value(attribute.components);
-        for (const auto field : attribute.resource.fields) out.Value(field);
         out.Value(attribute.fetchIndex);
     });
     writer.Value(result.vertexOffsetSgpr);
@@ -310,21 +310,15 @@ void encodeResult(Writer& writer, const RecompileResult& result) {
     });
 }
 
-void decodeResult(Reader& reader, RecompileResult& result) {
+void decodeArtifact(Reader& reader, CompiledShaderArtifact& result) {
     std::vector<std::uint32_t> words;
     reader.Values(words);
     result.spirv = std::move(words);
-    reader.List(result.bindings, 8, decodeBinding);
-    std::vector<std::uint8_t> pushConstants;
-    reader.Values(pushConstants);
-    result.pushConstants.resize(pushConstants.size());
-    if (!pushConstants.empty()) std::memcpy(result.pushConstants.data(), pushConstants.data(), pushConstants.size());
     reader.Value(result.bdaAbiVersion);
     reader.Value(result.memoryOffsetDword);
-    reader.List(result.vertexAttributes, 28, [](Reader& in, VertexAttribute& attribute) {
+    reader.List(result.vertexInputs, 12, [](Reader& in, VertexInput& attribute) {
         in.Value(attribute.location);
         in.Value(attribute.components);
-        for (auto& field : attribute.resource.fields) in.Value(field);
         in.Value(attribute.fetchIndex);
     });
     reader.Value(result.vertexOffsetSgpr);
@@ -342,8 +336,33 @@ void decodeResult(Reader& reader, RecompileResult& result) {
         in.Value(parameter.perVertex);
         in.Value(parameter.custom);
     });
-    result.cacheHit = false;
     result.variantId = 0;
+}
+
+void encodeInvocation(Writer& writer, const ShaderInvocation& invocation) {
+    writer.List(invocation.bindings, encodeBinding);
+    writer.Value<std::uint64_t>(invocation.pushConstants.size());
+    for (const auto byte : invocation.pushConstants) writer.Value(static_cast<std::uint8_t>(byte));
+    writer.List(invocation.vertexAttributes, [](Writer& out, const VertexAttribute& attribute) {
+        out.Value(attribute.location);
+        out.Value(attribute.components);
+        for (const auto field : attribute.resource.fields) out.Value(field);
+        out.Value(attribute.fetchIndex);
+    });
+}
+
+void decodeInvocation(Reader& reader, ShaderInvocation& invocation) {
+    reader.List(invocation.bindings, 8, decodeBinding);
+    std::vector<std::uint8_t> pushConstants;
+    reader.Values(pushConstants);
+    invocation.pushConstants.resize(pushConstants.size());
+    if (!pushConstants.empty()) std::memcpy(invocation.pushConstants.data(), pushConstants.data(), pushConstants.size());
+    reader.List(invocation.vertexAttributes, 28, [](Reader& in, VertexAttribute& attribute) {
+        in.Value(attribute.location);
+        in.Value(attribute.components);
+        for (auto& field : attribute.resource.fields) in.Value(field);
+        in.Value(attribute.fetchIndex);
+    });
 }
 
 void encodeLayout(Writer& writer, const IrBindingLayout& layout) {
@@ -556,24 +575,16 @@ void decodeInfo(Reader& reader, CompiledShaderInfo& compiled) {
     decodeLayout(reader, compiled.bindings);
 }
 
-void encodeAllocation(Writer& writer, const BindingAllocationResult& allocation) {
-    writer.List(allocation.bindings, encodeBinding);
+void encodeAllocation(Writer& writer, const CompiledBindingLayout& allocation) {
     encodeLayout(writer, allocation.layout);
     writer.Value(allocation.pushConstantOffsetBytes);
     writer.Value(allocation.pushConstantSizeBytes);
-    writer.Value<std::uint64_t>(allocation.pushConstants.size());
-    for (const auto byte : allocation.pushConstants) writer.Value(static_cast<std::uint8_t>(byte));
 }
 
-void decodeAllocation(Reader& reader, BindingAllocationResult& allocation) {
-    reader.List(allocation.bindings, 8, decodeBinding);
+void decodeAllocation(Reader& reader, CompiledBindingLayout& allocation) {
     decodeLayout(reader, allocation.layout);
     reader.Value(allocation.pushConstantOffsetBytes);
     reader.Value(allocation.pushConstantSizeBytes);
-    std::vector<std::uint8_t> pushConstants;
-    reader.Values(pushConstants);
-    allocation.pushConstants.resize(pushConstants.size());
-    if (!pushConstants.empty()) std::memcpy(allocation.pushConstants.data(), pushConstants.data(), pushConstants.size());
 }
 
 constexpr std::string_view NeutralSwitches[] = {
@@ -842,20 +853,23 @@ std::string EntryName(std::span<const std::byte> key) {
 
 void EncodeResult(const RecompileResult& result, std::vector<std::byte>& out) {
     Writer writer(out);
-    encodeResult(writer, result);
+    encodeArtifact(writer, result);
+    encodeInvocation(writer, result);
 }
 
 bool DecodeResult(std::span<const std::byte> bytes, RecompileResult& result) {
     Reader reader(bytes);
-    decodeResult(reader, result);
+    decodeArtifact(reader, result);
+    decodeInvocation(reader, result);
+    result.cacheHit = false;
     return reader.Done();
 }
 
 std::vector<std::byte> EncodeEntry(std::span<const std::byte> key, const CompiledVariant& variant) {
     std::vector<std::byte> payload;
-    payload.reserve(variant.result.spirv.size() * sizeof(std::uint32_t) + 4096);
+    payload.reserve(variant.artifact.spirv.size() * sizeof(std::uint32_t) + 4096);
     Writer writer(payload);
-    encodeResult(writer, variant.result);
+    encodeArtifact(writer, variant.artifact);
     encodeInfo(writer, variant.info);
     encodeAllocation(writer, variant.bindings);
     const FileHeader header{FileMagic, FormatVersion, SourceVersion(), key.size(), payload.size(), HashBytes(key), HashBytes(payload)};
@@ -880,13 +894,13 @@ LoadStatus DecodeEntry(std::span<const std::byte> file, std::span<const std::byt
     if (HashBytes(payload) != header.payloadHash) return LoadStatus::Rejected;
     Reader reader(payload);
     CompiledVariant decoded;
-    decodeResult(reader, decoded.result);
+    decodeArtifact(reader, decoded.artifact);
     decodeInfo(reader, decoded.info);
     decodeAllocation(reader, decoded.bindings);
     if (!reader.Done()) return LoadStatus::Rejected;
     variant.info = std::move(decoded.info);
     variant.bindings = std::move(decoded.bindings);
-    variant.result = std::move(decoded.result);
+    variant.artifact = std::move(decoded.artifact);
     return LoadStatus::Loaded;
 }
 

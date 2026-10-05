@@ -44,18 +44,13 @@ bool sameBindings(const std::vector<DescriptorBinding>& left, const std::vector<
     return true;
 }
 
-void requireSameResult(const RecompileResult& left, const RecompileResult& right, const char* what) {
+void requireSameArtifact(const CompiledShaderArtifact& left, const CompiledShaderArtifact& right, const char* what) {
     const std::string prefix = std::string(what) + ": ";
     require(left.spirv.Words() == right.spirv.Words(), prefix + "SPIR-V differs");
-    require(sameBindings(left.bindings, right.bindings), prefix + "bindings differ");
-    require(left.pushConstants == right.pushConstants, prefix + "push constants differ");
     require(left.bdaAbiVersion == right.bdaAbiVersion, prefix + "BDA ABI version differs");
-    require(left.vertexAttributes.size() == right.vertexAttributes.size(), prefix + "vertex attribute count differs");
-    for (std::size_t i = 0; i < left.vertexAttributes.size(); ++i) {
-        const auto& a = left.vertexAttributes[i];
-        const auto& b = right.vertexAttributes[i];
-        require(a.location == b.location && a.components == b.components && a.resource.fields == b.resource.fields && a.fetchIndex == b.fetchIndex, prefix + "vertex attribute differs");
-    }
+    require(left.memoryOffsetDword == right.memoryOffsetDword, prefix + "memory offset differs");
+    require(left.hostSubgroupSize == right.hostSubgroupSize, prefix + "host subgroup size differs");
+    require(left.vertexInputs == right.vertexInputs, prefix + "vertex inputs differ");
     require(left.vertexOffsetSgpr == right.vertexOffsetSgpr && left.instanceOffsetSgpr == right.instanceOffsetSgpr, prefix + "offset SGPRs differ");
     require(left.vertexOffsetShared == right.vertexOffsetShared && left.instanceOffsetShared == right.instanceOffsetShared && left.vertexOffsetConflict == right.vertexOffsetConflict && left.instanceOffsetConflict == right.instanceOffsetConflict, prefix + "offset flags differ");
     require(left.parameterExports == right.parameterExports, prefix + "parameter exports differ");
@@ -63,22 +58,33 @@ void requireSameResult(const RecompileResult& left, const RecompileResult& right
     for (std::size_t i = 0; i < left.fragmentParameters.size(); ++i) {
         const auto& a = left.fragmentParameters[i];
         const auto& b = right.fragmentParameters[i];
-        require(a.location == b.location && a.sourceLocation == b.sourceLocation && a.flat == b.flat && a.perVertex == b.perVertex, prefix + "fragment parameter differs");
+        require(a.location == b.location && a.sourceLocation == b.sourceLocation && a.flat == b.flat && a.perVertex == b.perVertex && a.custom == b.custom, prefix + "fragment parameter differs");
+    }
+}
+
+void requireSameResult(const RecompileResult& left, const RecompileResult& right, const char* what) {
+    requireSameArtifact(left, right, what);
+    const std::string prefix = std::string(what) + ": ";
+    require(sameBindings(left.bindings, right.bindings), prefix + "bindings differ");
+    require(left.pushConstants == right.pushConstants, prefix + "push constants differ");
+    require(left.vertexAttributes.size() == right.vertexAttributes.size(), prefix + "vertex attribute count differs");
+    for (std::size_t i = 0; i < left.vertexAttributes.size(); ++i) {
+        const auto& a = left.vertexAttributes[i];
+        const auto& b = right.vertexAttributes[i];
+        require(a.location == b.location && a.components == b.components && a.resource.fields == b.resource.fields && a.fetchIndex == b.fetchIndex, prefix + "vertex attribute differs");
     }
 }
 
 void requireSameVariant(const CompiledVariant& left, const CompiledVariant& right, const char* what) {
-    requireSameResult(left.result, right.result, what);
+    requireSameArtifact(left.artifact, right.artifact, what);
     const std::string prefix = std::string(what) + ": ";
     const auto& a = left.info;
     const auto& b = right.info;
     require(a.stage == b.stage && a.shaderHash == b.shaderHash && a.waveSize == b.waveSize && a.userDataBase == b.userDataBase && a.userDataCount == b.userDataCount && a.scratchDwords == b.scratchDwords && a.paramExportMask == b.paramExportMask, prefix + "compiled info differs");
     require(a.info == b.info, prefix + "shader info differs");
     require(a.bindings == b.bindings, prefix + "info binding layout differs");
-    require(sameBindings(left.bindings.bindings, right.bindings.bindings), prefix + "allocation bindings differ");
     require(left.bindings.layout == right.bindings.layout, prefix + "allocation layout differs");
     require(left.bindings.pushConstantOffsetBytes == right.bindings.pushConstantOffsetBytes && left.bindings.pushConstantSizeBytes == right.bindings.pushConstantSizeBytes, prefix + "push constant range differs");
-    require(left.bindings.pushConstants == right.bindings.pushConstants, prefix + "allocation push constants differ");
 }
 
 DescriptorBinding sampleBinding(std::uint32_t seed) {
@@ -115,6 +121,9 @@ RecompileResult sampleResult() {
     result.bindings[1].imageShape.reset();
     result.pushConstants = {std::byte{1}, std::byte{0xff}, std::byte{0}, std::byte{0x80}, std::byte{7}};
     result.bdaAbiVersion = 3;
+    result.memoryOffsetDword = 7;
+    result.hostSubgroupSize = 32;
+    result.vertexInputs = {{1, 4, 2}, {5, 2, 0}};
     result.vertexAttributes = {{1, 4, {{0x1000u, 0x20000u, 0x30u, 0x4u}}, 2}, {5, 2, {{9u, 8u, 7u, 6u}}, 0}};
     result.vertexOffsetSgpr = 12;
     result.instanceOffsetSgpr = -1;
@@ -123,16 +132,14 @@ RecompileResult sampleResult() {
     result.vertexOffsetConflict = false;
     result.instanceOffsetConflict = true;
     result.parameterExports = {0, 3, 7};
-    result.fragmentParameters = {{0, 1, true, false}, {2, 3, false, true}};
+    result.fragmentParameters = {{0, 1, true, false, true}, {2, 3, false, true}};
     result.variantId = 99;
     return result;
 }
 
 CompiledVariant sampleVariant() {
     CompiledVariant variant;
-    variant.result = sampleResult();
-    variant.result.bindings.clear();
-    variant.result.pushConstants.clear();
+    variant.artifact = sampleResult();
     variant.layout = {0, 0, 0, 128};
     auto& info = variant.info;
     info.stage = IrShaderStage::Compute;
@@ -199,8 +206,6 @@ CompiledVariant sampleVariant() {
     variant.bindings.layout = info.bindings;
     variant.bindings.pushConstantOffsetBytes = 16;
     variant.bindings.pushConstantSizeBytes = 112;
-    variant.bindings.bindings = {sampleBinding(3)};
-    variant.bindings.pushConstants = {std::byte{9}, std::byte{8}};
     return variant;
 }
 
@@ -274,6 +279,7 @@ void verifyEntryRoundTrip() {
     CompiledVariant decoded;
     require(ShaderDiskCache::DecodeEntry(file, key, decoded) == ShaderDiskCache::LoadStatus::Loaded, "an encoded entry does not decode");
     requireSameVariant(variant, decoded, "entry round trip");
+    require(decoded.artifact.variantId == 0, "the artifact stored a per-process id");
 
     for (std::size_t size = 0; size < file.size(); size += size < 512 ? 1 : 131) {
         CompiledVariant partial;
@@ -292,6 +298,26 @@ void verifyEntryRoundTrip() {
     auto otherKey = key;
     otherKey.back() ^= std::byte{1};
     require(ShaderDiskCache::DecodeEntry(file, otherKey, decoded) == ShaderDiskCache::LoadStatus::KeyMismatch, "an entry for another key loads");
+    auto previousVersion = file;
+    previousVersion[4] = std::byte{3};
+    require(ShaderDiskCache::DecodeEntry(previousVersion, key, decoded) == ShaderDiskCache::LoadStatus::Rejected, "an entry with the previous format version loads");
+}
+
+void verifyArtifactStorageIsolation() {
+    SampleRequest sample;
+    const auto key = sample.Key();
+    auto result = sampleResult();
+    auto variant = sampleVariant();
+    variant.artifact = result;
+    const auto before = ShaderDiskCache::EncodeEntry(key, variant);
+    result.bindings[0].guestDescriptor[0] ^= 0x10000u;
+    result.pushConstants[0] ^= std::byte{0xff};
+    result.vertexAttributes[0].resource.fields[0] ^= 0x10000u;
+    variant.artifact = result;
+    require(ShaderDiskCache::EncodeEntry(key, variant) == before, "invocation data changed the stored artifact");
+    result.vertexInputs[0].components = 2;
+    variant.artifact = result;
+    require(ShaderDiskCache::EncodeEntry(key, variant) != before, "the stored artifact ignores vertex input metadata");
 }
 
 void verifyKeySensitivity() {
@@ -534,6 +560,21 @@ void verifyFailureMemoSwitch(const char* self) {
     require(std::system(command.c_str()) == 0, "the process with APS5_NO_FAILURE_MEMO=1 failed");
 }
 
+void verifyInvocationIsolation() {
+    ComputeRequest request(true);
+    const auto first = Recompile(request.request);
+    request.userData[0] += 0x10000u;
+    const auto second = Recompile(request.request);
+    require(first.variantId != 0 && first.variantId == second.variantId, "a buffer address change did not reuse the artifact");
+    require(second.cacheHit, "the second invocation missed the compiled cache");
+    requireSameArtifact(first, second, "invocations sharing an artifact");
+    require(first.spirv.data() == second.spirv.data(), "invocations duplicated SPIR-V storage");
+    require(!sameBindings(first.bindings, second.bindings) || first.pushConstants != second.pushConstants, "the second invocation reused stale resource data");
+    request.userData[0] -= 0x10000u;
+    const auto restored = Recompile(request.request);
+    requireSameResult(first, restored, "restored invocation");
+}
+
 void verifyDefaultDirectory(const char* self) {
     setEnvironment("ANYPS5_SHADER_CACHE_DIR", "");
     setEnvironment("ANYPS5_NO_SHADER_CACHE", "1");
@@ -558,11 +599,13 @@ int main(int argc, char** argv) {
         setEnvironment("ANYPS5_SHADER_CACHE_DIR", directory.string());
         verifyResultRoundTrip();
         verifyEntryRoundTrip();
+        verifyArtifactStorageIsolation();
         verifyKeySensitivity();
         verifyStore();
         verifyAcrossProcesses(argv[0]);
         verifyEmissionFailureMemo();
         verifyFailureMemoSwitch(argv[0]);
+        verifyInvocationIsolation();
         std::error_code error;
         std::filesystem::remove_all(directory, error);
         std::cout << "shader disk cache tests passed\n";

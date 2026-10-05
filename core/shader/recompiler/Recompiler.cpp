@@ -332,7 +332,7 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     targetOptions.nonConstantImageOffsets = request.target.nonConstantImageOffsets;
 
     constexpr SpirvEmitter spirvEmitter;
-    RecompileResult result;
+    CompiledShaderArtifact result;
     result.variantId = nextVariantId();
     try {
         result.spirv = spirvEmitter.Emit(program, inputInfo, bindings, targetOptions);
@@ -364,20 +364,16 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
         for (const auto& input : program.Info().inputs) {
             if (input.kind != StageInputKind::Parameter) continue;
             if (input.location >= static_cast<std::uint32_t>(inputInfo.vertex->resourcesNum)) throw std::runtime_error("vertex attribute location exceeds resource count");
-            result.vertexAttributes.push_back({input.location, input.componentCount, {inputInfo.vertex->resources[input.location].fields}, inputInfo.vertex->resourcesDst[input.location].fetchIndex});
+            result.vertexInputs.push_back({input.location, input.componentCount, inputInfo.vertex->resourcesDst[input.location].fetchIndex});
         }
     }
 
-    result.bindings.clear();
-    result.pushConstants.clear();
-    for (auto& attribute : result.vertexAttributes) attribute.resource = {};
-    bindings.bindings.clear();
-    bindings.pushConstants.clear();
-    return {resourceSpecialization, request.layout, std::move(program).TakeCompiledInfo(), std::move(bindings), std::move(result)};
+    return {resourceSpecialization, request.layout, std::move(program).TakeCompiledInfo(), std::move(static_cast<CompiledBindingLayout&>(bindings)), std::move(result)};
 }
 
 RecompileResult materializeResult(const CompiledVariant& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot) {
-    auto result = variant.result;
+    RecompileResult result;
+    static_cast<CompiledShaderArtifact&>(result) = variant.artifact;
     BindingAllocationResult bindings;
     bindings.layout = variant.bindings.layout;
     bindings.pushConstantOffsetBytes = variant.bindings.pushConstantOffsetBytes;
@@ -385,9 +381,10 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
     DescriptorBindingBuilder{}.Populate(bindings, variant.info.info, variant.info.stage, variant.info.userDataBase, snapshot, partialThreads(request));
     result.bindings = std::move(bindings.bindings);
     result.pushConstants = std::move(bindings.pushConstants);
-    for (auto& attribute : result.vertexAttributes) {
-        if (!request.context.vertex || attribute.location >= request.context.vertex->resourcesNum) throw std::runtime_error("Shader cache: invalid vertex attribute metadata");
-        attribute.resource = request.context.vertex->resources[attribute.location];
+    result.vertexAttributes.reserve(result.vertexInputs.size());
+    for (const auto& input : result.vertexInputs) {
+        if (!request.context.vertex || input.location >= request.context.vertex->resourcesNum || input.location >= request.context.vertex->resources.size()) throw std::runtime_error("Shader cache: invalid vertex attribute metadata");
+        result.vertexAttributes.push_back({input.location, input.components, request.context.vertex->resources[input.location], input.fetchIndex});
     }
     return result;
 }
@@ -416,7 +413,7 @@ std::shared_ptr<const CompiledVariant> findOrCompileVariant(SourceEntry& source,
         if (ShaderDiskCache::Load(diskKey, loaded)) {
             loaded.specialization = specialization;
             loaded.layout = request.layout;
-            loaded.result.variantId = nextVariantId();
+            loaded.artifact.variantId = nextVariantId();
             variant = std::make_shared<const CompiledVariant>(std::move(loaded));
         }
     }
@@ -562,9 +559,9 @@ std::shared_ptr<const RecompileResult> materializeMemoized(SourceEntry& source, 
     {
         std::lock_guard lock(source.mutex);
         variant = findOrCompileVariant(source, request, snapshot, specialization, cacheHit);
-        index = (variant->result.variantId * 0x9e3779b97f4a7c15ull) ^ hash;
+        index = (variant->artifact.variantId * 0x9e3779b97f4a7c15ull) ^ hash;
         const auto found = source.memoIndex.find(index);
-        if (found != source.memoIndex.end() && found->second->variantId == variant->result.variantId && found->second->hash == hash) {
+        if (found != source.memoIndex.end() && found->second->variantId == variant->artifact.variantId && found->second->hash == hash) {
             source.memo.splice(source.memo.begin(), source.memo, found->second);
             counters.hits.fetch_add(1, std::memory_order_relaxed);
             if (memoHit != nullptr) *memoHit = true;
@@ -582,7 +579,7 @@ std::shared_ptr<const RecompileResult> materializeMemoized(SourceEntry& source, 
         std::lock_guard lock(source.mutex);
         const auto found = source.memoIndex.find(index);
         if (found != source.memoIndex.end()) {
-            if (found->second->variantId == variant->result.variantId && found->second->hash == hash) {
+            if (found->second->variantId == variant->artifact.variantId && found->second->hash == hash) {
                 source.memo.splice(source.memo.begin(), source.memo, found->second);
                 shared = found->second->result;
             } else {
@@ -591,7 +588,7 @@ std::shared_ptr<const RecompileResult> materializeMemoized(SourceEntry& source, 
             }
         }
         if (source.memoIndex.find(index) == source.memoIndex.end()) {
-            source.memo.push_front({variant->result.variantId, hash, shared});
+            source.memo.push_front({variant->artifact.variantId, hash, shared});
             source.memoIndex.emplace(index, source.memo.begin());
             while (source.memo.size() > ResultMemoEntries) {
                 const auto& last = source.memo.back();
