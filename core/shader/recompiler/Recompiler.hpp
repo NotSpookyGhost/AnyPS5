@@ -435,12 +435,6 @@ struct RecompileResult : CompiledShaderArtifact, ShaderInvocation {
 
 [[nodiscard]] RecompileResult Recompile(const RecompileRequest& request);
 
-// The resource plan, snapshot and specialization a driver captured for the request (see
-// CaptureResources in Optimization/ResourceProgram.hpp): this overload reuses them instead of
-// materializing the request's memory regions again, and is otherwise Recompile(request). The
-// result is immutable and shared: a capture that reproduces a snapshot the source's variant was
-// materialized over before receives the same object (`memoHit`), so the descriptor population runs
-// once per distinct snapshot. APS5_NO_RESULT_MEMO=1 materializes every call.
 struct ResourceCapture;
 [[nodiscard]] std::shared_ptr<const RecompileResult> Recompile(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit = nullptr);
 

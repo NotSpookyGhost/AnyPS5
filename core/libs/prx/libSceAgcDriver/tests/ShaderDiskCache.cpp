@@ -1,4 +1,5 @@
 #include "ShaderDiskCache.hpp"
+#include "CacheKey.hpp"
 #include "ShaderCacheDirectory.hpp"
 #include <algorithm>
 #include <array>
@@ -217,7 +218,6 @@ struct SampleRequest {
     std::array<std::string_view, 1> extensions{"SPV_KHR_storage_buffer_storage_class"};
     std::array<std::byte, 16> header{};
     RecompileRequest request{};
-    ResourceSpecialization specialization;
     std::uint32_t hostSubgroupSize = 32;
 
     SampleRequest() {
@@ -236,8 +236,6 @@ struct SampleRequest {
         request.target.maxWorkgroupInvocations = 1024;
         request.target.maxWorkgroupSharedMemoryBytes = 49152;
         request.layout = {0, 0, 0, 128};
-        specialization.images = {ResourceSpecialization::Image{}};
-        specialization.boundDescriptors = {0, 0};
     }
 
     std::vector<std::byte> Key() {
@@ -245,7 +243,7 @@ struct SampleRequest {
         request.context.userData = userData;
         request.target.supportedCapabilities = capabilities;
         std::vector<std::byte> key;
-        ShaderDiskCache::BuildKey(request, hostSubgroupSize, specialization, key);
+        ShaderDiskCache::BuildKey(request, hostSubgroupSize, key);
         return key;
     }
 };
@@ -376,19 +374,6 @@ void verifyKeySensitivity() {
     changes("the first binding", [](SampleRequest& sample) { sample.request.layout.firstBinding = 1; });
     changes("the push constant offset", [](SampleRequest& sample) { sample.request.layout.pushConstantOffsetBytes = 16; });
     changes("the push constant size", [](SampleRequest& sample) { sample.request.layout.pushConstantSizeBytes = 64; });
-    changes("an image class", [](SampleRequest& sample) { sample.specialization.images[0].numericClass = IrTextureNumericClass::Float; });
-    changes("an image dimension", [](SampleRequest& sample) { sample.specialization.images[0].dimension = static_cast<RdnaImageDimension>(1); });
-    changes("an image mip count", [](SampleRequest& sample) { sample.specialization.images[0].mipCount = 2; });
-    changes("an image conversion", [](SampleRequest& sample) { sample.specialization.images[0].conversionFormat = static_cast<IrBufferFormat>(1); });
-    changes("an image swizzle", [](SampleRequest& sample) { sample.specialization.images[0].shaderSwizzle = 0; });
-    changes("an image indirect root", [](SampleRequest& sample) { sample.specialization.images[0].indirectRoot = 0; });
-    changes("an image mapping offset", [](SampleRequest& sample) { sample.specialization.images[0].indirectMappingOffset = 4; });
-    changes("an image search depth", [](SampleRequest& sample) { sample.specialization.images[0].indirectSearchIterations = 2; });
-    changes("an image cube flag", [](SampleRequest& sample) { sample.specialization.images[0].cube = true; });
-    changes("an image FMASK flag", [](SampleRequest& sample) { sample.specialization.images[0].fmask = true; });
-    changes("an image sRGB decode", [](SampleRequest& sample) { sample.specialization.images[0].srgbDecode = true; });
-    changes("the image count", [](SampleRequest& sample) { sample.specialization.images.emplace_back(); });
-    changes("the bound descriptors", [](SampleRequest& sample) { sample.specialization.boundDescriptors.push_back(1); });
 
     SampleRequest moved;
     moved.userData[0] ^= 0x10000u;
@@ -396,6 +381,33 @@ void verifyKeySensitivity() {
     moved.request.shader.headerAddress += 0x1000000u;
     moved.header[3] = std::byte{1};
     require(moved.Key() == key, "the key depends on the user data values or the addresses");
+    std::array<std::byte, 32> descriptors{};
+    const std::array regions{MemoryRegion{0x100000u, descriptors}};
+    moved.request.context.memory = regions;
+    std::fill(moved.userData.begin(), moved.userData.end(), 0xffffffffu);
+    require(moved.Key() == key, "runtime descriptors changed the artifact key");
+    SampleRequest vertex;
+    vertex.request.shader.stage = ShaderStage::Vertex;
+    vertex.request.context.compute.reset();
+    vertex.request.context.vertex.emplace();
+    auto& input = *vertex.request.context.vertex;
+    input.resourcesNum = 1u;
+    input.resources[0].fields = {0x10000u, 16u << 16u, 64u, (22u << 12u) | 0xfacu};
+    input.resourcesDst[0] = {0u, 4u, 0u, 0u};
+    const auto vertexKey = vertex.Key();
+    const auto contextKey = RecompileCacheKey::ContextHash(vertex.request);
+    input.resources[0].fields = {0x20000u, 32u << 16u, 128u, (77u << 12u) | 0xfa9u};
+    require(vertex.Key() == vertexKey && RecompileCacheKey::ContextHash(vertex.request) == contextKey, "runtime vertex format, stride, swizzle or address changed the static interface key");
+    input.resources[0].fields[3] = (20u << 12u) | 0xfacu;
+    require(vertex.Key() != vertexKey && RecompileCacheKey::ContextHash(vertex.request) != contextKey, "integer vertex input reused a float interface");
+    input.resources[0].fields[3] = (77u << 12u) | 0xfa9u;
+    input.resourcesDst[0].registersNum = 2u;
+    require(vertex.Key() != vertexKey, "vertex component interface did not change the artifact key");
+    input.fetchEmbedded = true;
+    const auto embeddedKey = vertex.Key();
+    input.resources[0].fields = {};
+    input.resourcesNum = 0u;
+    require(vertex.Key() == embeddedKey, "runtime vertex fetch descriptors changed the artifact key");
 }
 
 void verifyStore() {
@@ -481,7 +493,8 @@ void verifyAcrossProcesses(const char* self) {
 struct ClockRequest {
     std::vector<std::uint32_t> code{0xf4900100u, 0x00000000u, 0xbf8cc07fu, 0x7e020204u, 0xe0700000u, 0x80000100u, 0xf800180fu, 0x01010101u, 0xbf810000u};
     std::array<std::uint32_t, 4> userData{0x10000000u, 0x00000000u, 0x40u, 0x00027facu};
-    std::array<std::uint32_t, 1> capabilities{1u};
+    std::array<std::uint32_t, 4> capabilities{1u, 11u, 5347u, 4448u};
+    std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
     RecompileRequest request{};
 
     explicit ClockRequest(std::uint32_t stride = 0) {
@@ -500,13 +513,15 @@ struct ClockRequest {
         request.target.spirvVersion = 0x00010300u;
         request.target.subgroupSize = 32;
         request.target.supportedCapabilities = capabilities;
+        request.target.supportedExtensions = extensions;
+        request.target.bdaAbiVersion = 1u;
         request.layout.pushConstantSizeBytes = 128;
     }
 };
 
 std::string emissionFailure(const RecompileRequest& request) {
     try {
-        static_cast<void>(Recompile(request));
+        static_cast<void>(PrepareShader(request));
     } catch (const std::runtime_error& error) {
         const std::string message = error.what();
         require(message.find("reads the shader clock, which needs the device's VK_KHR_shader_clock") != std::string::npos, "unexpected failure: " + message.substr(0, message.find("RecompileRequest:")));
@@ -533,12 +548,12 @@ void verifyEmissionFailureMemo() {
     require(diskMisses() == before.misses + 2, "another binding layout reused the failure");
     ClockRequest stride(16);
     static_cast<void>(emissionFailure(stride.request));
-    require(diskMisses() == before.misses + 3, "another buffer specialization reused the failure");
+    require(diskMisses() == before.misses + 2, "a runtime buffer stride change repeated static preparation");
     ClockRequest relocated;
     relocated.request.shader.codeAddress += 0x1000u;
     static_cast<void>(emissionFailure(relocated.request));
-    require(diskMisses() == before.misses + 4, "a relocated copy reused the failure");
-    require(emissionFailure(clock.request) == first && diskMisses() == before.misses + 4, "the other requests replaced the failure");
+    require(diskMisses() == before.misses + 3, "a relocated copy reused the failure");
+    require(emissionFailure(clock.request) == first && diskMisses() == before.misses + 3, "the other requests replaced the failure");
 
     ClockRequest concurrent;
     concurrent.request.layout.pushConstantSizeBytes = 64;
@@ -547,7 +562,7 @@ void verifyEmissionFailureMemo() {
     std::vector<std::string> messages;
     for (auto& future : failures) messages.push_back(future.get());
     require(std::all_of(messages.begin(), messages.end(), [&](const std::string& message) { return message == messages.front(); }), "concurrent requests failed with different messages");
-    require(diskMisses() == before.misses + 5, "concurrent requests emitted the program " + std::to_string(diskMisses() - before.misses - 4) + " times");
+    require(diskMisses() == before.misses + 4, "concurrent requests emitted the program " + std::to_string(diskMisses() - before.misses - 3) + " times");
 
     ShaderDiskCache::Flush();
     require(ShaderDiskCache::Totals().writes == before.writes, "an emission failure was stored in the disk cache");

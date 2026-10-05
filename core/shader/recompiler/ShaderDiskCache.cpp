@@ -82,8 +82,6 @@ static_assert(sizeof(IrBindingLayout) == 64, "IrBindingLayout changed: update th
 static_assert(sizeof(IrDescriptorBinding) == 32, "IrDescriptorBinding changed: update the layout encoder");
 static_assert(sizeof(BindingAllocationResult) == 120, "BindingAllocationResult changed: update the allocation encoder");
 static_assert(sizeof(CompiledBindingLayout) == 72, "CompiledBindingLayout changed: update the allocation encoder");
-static_assert(sizeof(ResourceSpecialization) == 48, "ResourceSpecialization changed: update BuildKey");
-static_assert(sizeof(ResourceSpecialization::Image) == 48, "ResourceSpecialization::Image changed: update BuildKey");
 static_assert(sizeof(BindingLayout) == 16, "BindingLayout changed: update BuildKey");
 #endif
 
@@ -800,7 +798,7 @@ std::uint64_t SourceVersion() {
     return Generated::SourceVersion;
 }
 
-void BuildKey(const RecompileRequest& request, std::uint32_t hostSubgroupSize, const ResourceSpecialization& specialization, std::vector<std::byte>& key) {
+void BuildKey(const RecompileRequest& request, std::uint32_t hostSubgroupSize, std::vector<std::byte>& key) {
     key.clear();
     Writer writer(key);
     writer.Value(FileMagic);
@@ -816,24 +814,6 @@ void BuildKey(const RecompileRequest& request, std::uint32_t hostSubgroupSize, c
     writer.Value(request.layout.firstBinding);
     writer.Value(request.layout.pushConstantOffsetBytes);
     writer.Value(request.layout.pushConstantSizeBytes);
-    writer.List(specialization.images, [](Writer& out, const ResourceSpecialization::Image& image) {
-        out.Value(image.numericClass);
-        out.Value(image.dimension);
-        out.Value(image.mipCount);
-        out.Value(image.conversionFormat);
-        out.Value(image.shaderSwizzle);
-        out.Value(image.indirectRoot);
-        out.Value(image.indirectMappingOffset);
-        out.Value(image.indirectSearchIterations);
-        out.Value(image.cube);
-        out.Value(image.fmask);
-        out.Value(image.depthBits);
-        out.Value(image.depthUnorm16);
-        out.Value(image.packedFormat);
-        out.Value(image.emulatedCompare);
-        out.Value(image.srgbDecode);
-    });
-    writer.Values(std::span<const std::uint32_t>(specialization.boundDescriptors));
     const auto& switches = switchKey();
     key.insert(key.end(), switches.begin(), switches.end());
 }

@@ -277,14 +277,12 @@ void verifyBindlessTable() {
         return std::vector<std::uint32_t>(snapshot.flattenedSrt.end() - static_cast<std::ptrdiff_t>(1u + 2u * slots), snapshot.flattenedSrt.end());
     };
     const auto tableRoot = [&](const ResourceCapture& capture, std::uint32_t direct) {
-        require(capture.specialization.images.size() == direct + slots - 1u, "bindless: the specialization does not hold the table slots");
         require(capture.snapshot.images.size() == direct + slots - 1u, "bindless: the snapshot does not hold the table slots");
         std::uint32_t root = ImageResource::NoIndirectImage;
         for (std::uint32_t i = 0; i < direct; i++) {
-            if (capture.specialization.images[i].indirectRoot == i) root = i;
+            if (capture.plan->descriptorSources.at(capture.plan->info.images.at(i).source).indirectImage.has_value()) root = i;
         }
         require(root != ImageResource::NoIndirectImage, "bindless: no table root");
-        for (std::uint32_t i = direct; i < capture.specialization.images.size(); i++) require(capture.specialization.images[i].indirectRoot == root, "bindless: an extra image is not the root's slot");
         return root;
     };
 
@@ -300,6 +298,16 @@ void verifyBindlessTable() {
     require(tables == 1, "bindless: the table source was not planned");
     for (const auto& image : plan->info.images) require(image.indirectSearchIterations == 0u, "bindless: the plan carries a search depth");
     const auto direct = static_cast<std::uint32_t>(plan->info.images.size());
+    auto staticRequest = request;
+    const std::array<std::uint32_t, 2> absentResources{};
+    staticRequest.context.userData = absentResources;
+    staticRequest.context.memory = {};
+    auto staticProgram = PrepareResourceProgram(staticRequest);
+    ResourceMaterializer{}.ApplyStaticInterface(staticProgram);
+    const auto& staticImages = staticProgram.Resources().info.images;
+    require(staticImages.size() == direct + slots - 1u, "bindless: the static interface needs runtime descriptors");
+    const auto staticRoot = std::ranges::find_if(staticImages, [](const ImageResource& image) { return image.indirectSearchIterations != 0u; });
+    require(staticRoot != staticImages.end() && staticRoot->indirectResources.size() == slots && staticRoot->indirectMappingOffset == plan->srtReads.size(), "bindless: the static table interface is incomplete");
 
     AgcDriver::ShaderMemory memory({});
     const auto capture = memory.Capture(request);
@@ -308,7 +316,7 @@ void verifyBindlessTable() {
     for (std::uint32_t i = direct + 2u; i < capture->snapshot.images.size(); i++) require(capture->snapshot.images[i].dwords == heap[2], "bindless: a pad slot is not null");
     const auto mapping = mappingOf(capture->snapshot);
     require(std::vector<std::uint32_t>(mapping.begin(), mapping.begin() + 7) == std::vector<std::uint32_t>{3u, 0u, 0u, 1u, 1u, 3u, 2u}, "bindless: the (key, slot) mapping is wrong");
-    require(capture->specialization.images[root].indirectMappingOffset + mapping.size() == capture->snapshot.flattenedSrt.size(), "bindless: the mapping offset does not name the block");
+    require(capture->plan->srtReads.size() + mapping.size() == capture->snapshot.flattenedSrt.size(), "bindless: the mapping offset does not name the block");
     auto regions = memory.Regions();
     for (const auto& material : materials) require(covered(regions, &material[1], sizeof(std::uint32_t)), "bindless: a material key was not captured");
     for (const auto entry : {0u, 1u, 3u}) require(covered(regions, heap[entry].data(), 32u), "bindless: a table entry was not captured");

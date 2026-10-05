@@ -2,6 +2,7 @@
 #define CORE_SHADER_RECOMPILER_CACHEKEY_HPP
 
 #include "Recompiler.hpp"
+#include "RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include "prx/libc/include/HostThreadLocal.hpp"
 #include <cstdlib>
 #include <stdexcept>
@@ -162,8 +163,7 @@ private:
         if (value.fetchEmbedded) return;
         append(key, value.resourcesNum);
         for (std::uint32_t i = 0; i < value.resourcesNum; ++i) {
-            append(key, value.resources[i].fields[1] & 0xffff0000u);
-            append(key, value.resources[i].fields[3]);
+            append(key, VertexInputNumericClass(static_cast<IrBufferFormat>((value.resources[i].fields[3] >> 12u) & 0x7fu)));
             append(key, value.resourcesDst[i]);
         }
     }

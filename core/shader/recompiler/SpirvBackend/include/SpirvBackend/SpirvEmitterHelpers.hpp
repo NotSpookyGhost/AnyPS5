@@ -71,7 +71,7 @@ std::uint32_t ConstantBool(SpirvEmitterState& state, bool value);
 std::uint32_t ConstantU64(SpirvEmitterState& state, std::uint64_t value);
 std::uint32_t ConstantU32CompositeZero(SpirvEmitterState& state, std::uint32_t components);
 std::uint32_t DefineInterfaceVariable(SpirvEmitterState& state, std::uint32_t type, std::uint32_t storage, const char* name);
-void CheckBindings(const IrProgram& program, const BindingAllocationResult& bindings);
+void CheckBindings(const IrProgram& program, const CompiledBindingLayout& bindings);
 void EmitBaseHeader(SpirvModule& module, const IrProgram& program);
 void DefineInputs(SpirvEmitterState& state);
 void DefineOutputs(SpirvEmitterState& state);

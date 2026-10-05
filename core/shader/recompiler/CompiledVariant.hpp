@@ -4,12 +4,10 @@
 #include "Recompiler.hpp"
 #include "IntermediateRepresentation/IrMetadata/CompiledShaderInfo.hpp"
 #include "Optimization/include/Optimization/BindingAllocator.hpp"
-#include "Optimization/include/Optimization/ResourceMaterializer.hpp"
 
 namespace ShaderRecompiler {
 
 struct CompiledVariant {
-    ResourceSpecialization specialization;
     BindingLayout layout;
     CompiledShaderInfo info;
     CompiledBindingLayout bindings;

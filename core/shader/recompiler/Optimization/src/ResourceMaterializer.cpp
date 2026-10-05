@@ -491,8 +491,8 @@ std::uint32_t colorCompareReference(IrBufferFormat format) {
     }
 }
 
-std::uint32_t emulatedCompareState(const IrResourcePlan& plan, const ResourceSnapshot& snapshot, std::uint32_t index) {
-    const auto& image = plan.info.images[index];
+std::uint32_t emulatedCompareState(const ShaderInfo& info, const ResourceSnapshot& snapshot, std::uint32_t index) {
+    const auto& image = info.images[index];
     const auto& descriptor = snapshot.images[index];
     if (!image.depthCompare || descriptor.dwordCount != 8u || nullImageDescriptor(descriptor)) return 0u;
     const auto format = rawImageFormat(descriptor);
@@ -502,7 +502,7 @@ std::uint32_t emulatedCompareState(const IrResourcePlan& plan, const ResourceSna
     if (type != ImageType::Color2D && type != ImageType::Color2DArray) throw std::runtime_error("comparison sampling of a color texture is implemented only for 2D and 2D array views");
     if ((descriptorImageSwizzle(descriptor) & 0x7u) != 4u) throw std::runtime_error("comparison sampling of a color texture is implemented only when the view's X channel is red");
     std::optional<std::uint32_t> samplerState;
-    for (const auto& pair : plan.info.sampledPairs) {
+    for (const auto& pair : info.sampledPairs) {
         if (pair.image != index) continue;
         if (pair.sampler >= snapshot.samplers.size() || snapshot.samplers[pair.sampler].dwordCount != 4u) throw std::runtime_error("comparison sampling of a color texture has no sampler descriptor");
         const auto& words = snapshot.samplers[pair.sampler].dwords;
@@ -536,77 +536,33 @@ std::uint32_t emulatedCompareState(const IrResourcePlan& plan, const ResourceSna
     return *samplerState | (reference << EmulatedCompare::ReferenceShift) | (singleLevel ? EmulatedCompare::SingleLevel : 0u);
 }
 
-void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& snapshot, const std::vector<TableResolution>& tables, ResourceSpecialization& specialization) {
-    ResourceSpecialization result;
-    for (std::uint32_t i = 0; i < plan.info.buffers.size(); ++i) {
+void materializeTables(const IrResourcePlan& plan, ResourceSnapshot& snapshot, const std::vector<TableResolution>& tables) {
+    for (std::uint32_t i = 0u; i < plan.info.buffers.size(); ++i) {
         const auto decoded = decodeBufferDescriptor(snapshot.buffers.at(i));
         if (decoded.Type() != 0u) throw std::runtime_error("buffer descriptor uses an unsupported type");
         if (plan.stage != IrShaderStage::Compute && decoded.AddTid()) throw std::runtime_error("buffer ADD_TID is only valid for compute shaders");
     }
-
-    result.images.reserve(plan.info.images.size());
-    for (std::uint32_t i = 0; i < plan.info.images.size(); i++) {
+    if (snapshot.flattenedSrt.size() != plan.srtReads.size()) throw std::runtime_error("runtime SRT size differs from the static interface");
+    for (std::uint32_t i = 0u; i < plan.info.images.size(); ++i) {
         const auto& image = plan.info.images[i];
-        const DecodedImage decoded = decodeImageDescriptor(snapshot.images[i], image, plan.srgbDecodeFormats);
-        if (decoded.fmask && std::any_of(plan.info.sampledPairs.begin(), plan.info.sampledPairs.end(), [i](const SampledResourcePair& pair) { return pair.image == i; })) {
-            throw std::runtime_error("FMASK requires a direct image load");
-        }
-        ResourceSpecialization::Image entry;
-        entry.numericClass = image.atomic ? IrTextureNumericClass::Uint : IrTextureNumericClass::Float;
-        entry.dimension = image.dimension;
-        entry.mipCount = image.mipMode == ImageMipMode::DynamicStorage ? RuntimeAbi::StorageHeapCapacity : 1u;
-        entry.conversionFormat = IrBufferFormat::Invalid;
-        entry.shaderSwizzle = ShaderImageIdentitySwizzle;
-        entry.indirectRoot = ImageResource::NoIndirectImage;
-        entry.indirectMappingOffset = 0u;
-        entry.indirectSearchIterations = 0u;
-        entry.cube = false;
-        entry.fmask = false;
-        entry.depthBits = false;
-        entry.depthUnorm16 = false;
-        entry.packedFormat = IrBufferFormat::Invalid;
-        entry.emulatedCompare = emulatedCompareState(plan, snapshot, i);
-        entry.srgbDecode = decoded.srgbDecode;
-        result.images.push_back(entry);
-    }
-
-    // A table root is followed by its slots 1..C-1 as extra images of the root's shape; the
-    // (key, slot) mapping the SPIR-V selector searches is appended to the flattened SRT in a
-    // block of fixed size, so the offsets (part of the specialization) never depend on the keys.
-    for (std::uint32_t i = 0; i < plan.info.images.size(); i++) {
-        const auto& table = tables[i];
-        if (table.slots.empty()) {
+        static_cast<void>(ResourceMaterializer::RuntimeImageMode(image, snapshot.images.at(i)));
+        const auto& table = tables.at(i);
+        if (!plan.descriptorSources.at(image.source).indirectImage.has_value()) {
+            if (!table.slots.empty()) throw std::runtime_error("direct image has runtime table slots");
             continue;
         }
-        const auto mappingOffset = static_cast<std::uint32_t>(snapshot.flattenedSrt.size());
+        const auto slots = ResourceMaterializer::BindlessSlots();
+        if (table.slots.size() != slots) throw std::runtime_error("runtime table size differs from the static interface");
+        const auto mappingOffset = snapshot.flattenedSrt.size();
         snapshot.flattenedSrt.push_back(static_cast<std::uint32_t>(table.mapping.size()));
         for (const auto& [key, slot] : table.mapping) {
+            if (slot >= slots) throw std::runtime_error("runtime table slot exceeds its static capacity");
             snapshot.flattenedSrt.push_back(key);
             snapshot.flattenedSrt.push_back(slot == 0u ? i : static_cast<std::uint32_t>(snapshot.images.size()) + slot - 1u);
         }
-        snapshot.flattenedSrt.resize(mappingOffset + 1u + 2u * table.slots.size(), 0u);
-        auto root = result.images[i];
-        root.indirectRoot = i;
-        root.indirectMappingOffset = mappingOffset;
-        root.indirectSearchIterations = static_cast<std::uint32_t>(std::bit_width(table.slots.size()));
-        result.images[i] = root;
-        root.indirectMappingOffset = 0u;
-        root.indirectSearchIterations = 0u;
-        for (std::uint32_t slot = 1; slot < table.slots.size(); slot++) {
-            result.images.push_back(root);
-            snapshot.images.push_back(table.slots[slot]);
-        }
+        snapshot.flattenedSrt.resize(mappingOffset + 1u + 2u * slots, 0u);
+        snapshot.images.insert(snapshot.images.end(), table.slots.begin() + 1u, table.slots.end());
     }
-
-    result.boundDescriptors.clear();
-    result.boundDescriptors.reserve(plan.info.buffers.size() + result.images.size());
-    for (std::uint32_t index = 0; index < plan.info.buffers.size(); index++) {
-        result.boundDescriptors.push_back(index);
-    }
-    for (std::uint32_t index = 0; index < result.images.size(); index++) {
-        result.boundDescriptors.push_back(index);
-    }
-    specialization = std::move(result);
 }
 
 }
@@ -694,60 +650,44 @@ std::uint32_t ResourceMaterializer::RuntimeImageMode(const ImageResource& image,
     throw std::runtime_error("image descriptor is incompatible with the static runtime image interface");
 }
 
-void ResourceMaterializer::Apply(IrProgram& program, const ResourceSpecialization& specialization) const {
-    IrResourcePlan& resources = program.Resources();
-    if (!resources.resourceTrackingComplete) {
-        throw std::runtime_error("ResourceMaterializer::Apply requires a completed resource plan");
-    }
-    if (resources.info.images.size() > specialization.images.size()) {
-        throw std::runtime_error("ResourceMaterializer::Apply image count mismatch");
-    }
+std::uint32_t ResourceMaterializer::EmulatedCompareState(const ShaderInfo& info, const ResourceSnapshot& snapshot, std::uint32_t index) {
+    return emulatedCompareState(info, snapshot, index);
+}
 
+void ResourceMaterializer::ApplyStaticInterface(IrProgram& program) const {
+    auto& resources = program.Resources();
+    if (!resources.resourceTrackingComplete || !resources.srtPlanComplete) throw std::runtime_error("static resource interface requires a completed resource plan");
     auto images = resources.info.images;
-    images.reserve(specialization.images.size());
-    for (std::uint32_t index = 0; index < specialization.images.size(); index++) {
-        const auto& source = specialization.images[index];
-        if (index >= images.size()) {
-            if (source.indirectRoot >= resources.info.images.size()) {
-                throw std::runtime_error("ResourceMaterializer::Apply indirect image root is out of range");
+    const auto directCount = static_cast<std::uint32_t>(images.size());
+    auto mappingOffset = static_cast<std::uint32_t>(resources.srtReads.size());
+    const auto slots = BindlessSlots();
+    for (std::uint32_t index = 0u; index < directCount; ++index) {
+        auto image = images[index];
+        if (image.indirectRoot != ImageResource::NoIndirectImage) throw std::runtime_error("static image interface was already expanded");
+        image.numericClass = image.atomic ? IrTextureNumericClass::Uint : IrTextureNumericClass::Float;
+        image.mipCount = image.mipMode == ImageMipMode::DynamicStorage ? RuntimeAbi::StorageHeapCapacity : 1u;
+        if (resources.descriptorSources.at(image.source).indirectImage.has_value()) {
+            if (images.size() + slots - 1u > ShaderInfo::MaxImages) throw std::runtime_error("static bindless image capacity exceeded");
+            image.indirectRoot = index;
+            image.indirectResources.push_back(index);
+            for (std::uint32_t slot = 1u; slot < slots; ++slot) {
+                auto entry = image;
+                entry.indirectResources.clear();
+                image.indirectResources.push_back(static_cast<std::uint32_t>(images.size()));
+                images.push_back(std::move(entry));
             }
-            images.push_back(resources.info.images[source.indirectRoot]);
+            image.indirectMappingOffset = mappingOffset;
+            image.indirectSearchIterations = static_cast<std::uint32_t>(std::bit_width(slots));
+            mappingOffset += 1u + 2u * slots;
         }
-        auto& image = images[index];
-        image.numericClass = source.numericClass;
-        image.dimension = source.dimension;
-        image.mipCount = source.mipCount;
-        image.conversionFormat = source.conversionFormat;
-        image.shaderSwizzle = source.shaderSwizzle;
-        image.indirectRoot = source.indirectRoot;
-        image.indirectMappingOffset = source.indirectMappingOffset;
-        image.indirectSearchIterations = source.indirectSearchIterations;
-        image.cube = source.cube;
-        image.depthBits = source.depthBits;
-        image.depthUnorm16 = source.depthUnorm16;
-        image.packedFormat = source.packedFormat;
-        image.emulatedCompare = source.emulatedCompare;
-        image.srgbDecode = source.srgbDecode;
-        if ((source.emulatedCompare & EmulatedCompare::Enabled) != 0u) image.depthCompare = false;
-        image.indirectResources.clear();
+        images[index] = std::move(image);
     }
-    for (std::uint32_t index = 0; index < images.size(); index++) {
-        const auto root = images[index].indirectRoot;
-        if (root != ImageResource::NoIndirectImage) {
-            if (root >= images.size()) {
-                throw std::runtime_error("ResourceMaterializer::Apply indirect image root is out of range");
-            }
-            images[root].indirectResources.push_back(index);
-        }
-    }
-
-    auto samplers = resources.info.samplers;
     for (const auto& pair : resources.info.sampledPairs) {
-        if (pair.image >= images.size() || pair.sampler >= samplers.size()) throw std::runtime_error("runtime sampled pair is out of range");
-        samplers[pair.sampler].depthCompare = samplers[pair.sampler].depthCompare || images[pair.image].depthCompare;
+        if (pair.image >= images.size() || pair.sampler >= resources.info.samplers.size()) throw std::runtime_error("static sampled pair is out of range");
+        auto& sampler = resources.info.samplers[pair.sampler];
+        sampler.depthCompare = sampler.depthCompare || images[pair.image].depthCompare;
     }
     resources.info.images = std::move(images);
-    resources.info.samplers = std::move(samplers);
 }
 
 namespace {
@@ -856,7 +796,7 @@ IrResourcePlan ResourceMaterializer::ExtractPlan(const IrProgram& program) const
     return plan;
 }
 
-void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtRuntime& runtime, ResourceSnapshot& snapshot, ResourceSpecialization& specialization) const {
+void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtRuntime& runtime, ResourceSnapshot& snapshot) const {
     const IrResourcePlan& plan = program;
     if (!plan.resourceTrackingComplete) {
         throw std::runtime_error("ResourceMaterializer::Materialize requires a completed resource plan");
@@ -873,12 +813,10 @@ void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtR
         reportBindless();
         throw;
     }
-    ResourceSpecialization nextSpecialization;
     const auto started = MaterializeProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    buildResourceSpecialization(plan, nextSnapshot, tables, nextSpecialization);
+    materializeTables(plan, nextSnapshot, tables);
     if (MaterializeProfiled()) specializationNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
     snapshot = std::move(nextSnapshot);
-    specialization = std::move(nextSpecialization);
     reportBindless();
 }
 
@@ -892,14 +830,6 @@ std::uint32_t ResourceMaterializer::BindlessSlots() {
 
 void ResourceMaterializer::CountBindlessRejection(BindlessRejection reason) {
     if (reason < BindlessRejection::Count) bindlessCounters().rejected[static_cast<std::size_t>(reason)].fetch_add(1, std::memory_order_relaxed);
-}
-
-bool ResourceSpecialization::Image::operator==(const Image& other) const {
-    return numericClass == other.numericClass && dimension == other.dimension && mipCount == other.mipCount && conversionFormat == other.conversionFormat && shaderSwizzle == other.shaderSwizzle && indirectRoot == other.indirectRoot && indirectMappingOffset == other.indirectMappingOffset && indirectSearchIterations == other.indirectSearchIterations && cube == other.cube && fmask == other.fmask && depthBits == other.depthBits && depthUnorm16 == other.depthUnorm16 && packedFormat == other.packedFormat && emulatedCompare == other.emulatedCompare && srgbDecode == other.srgbDecode;
-}
-
-bool ResourceSpecialization::operator==(const ResourceSpecialization& other) const {
-    return images == other.images;
 }
 
 }
