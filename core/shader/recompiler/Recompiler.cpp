@@ -110,18 +110,10 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request) {
     translateOptions.waveSize = request.context.waveSize;
     translateOptions.userDataBaseRegister = request.context.userDataBaseRegister;
     translateOptions.userDataCount = static_cast<std::uint32_t>(request.context.userData.size());
-    translateOptions.embeddedFetch = nullptr;
     translateOptions.fragmentShaderBarycentricEnabled = request.target.fragmentShaderBarycentricEnabled;
     translateOptions.inputInfo = inputInfo;
 
     constexpr InstructionTranslator translator;
-
-    EmbeddedFetchPlan embeddedFetch;
-    if ((stageKind == ShaderStageKind::Vertex || stageKind == ShaderStageKind::Local) && inputInfo.vertex != nullptr && inputInfo.vertex->fetchEmbedded) {
-        constexpr EmbeddedVertexFetchAnalyzer embeddedFetchAnalyzer;
-        embeddedFetch = embeddedFetchAnalyzer.Analyze(decoded, inputInfo.vertex->fetchAttribReg, inputInfo.vertex->fetchBufferReg, request.context.userDataBaseRegister, static_cast<std::uint32_t>(request.context.userData.size()), request.context.waveSize);
-    }
-    translateOptions.embeddedFetch = embeddedFetch.loads.empty() ? nullptr : &embeddedFetch;
 
     auto program = translator.Translate(decoded, cfg, translateOptions);
     // Debug aid: APS5_DUMP_IR=<hex code address> (or "all") prints the program after each front-end pass.
@@ -533,7 +525,7 @@ std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapsh
     mix(snapshot.uniformFill.words);
     mix(snapshot.uniformFill.value);
     for (const auto threads : partialThreads(request)) mix(threads);
-    if (request.context.vertex) {
+    if (request.context.vertex && !request.context.vertex->fetchEmbedded) {
         const auto& vertex = *request.context.vertex;
         const auto count = std::min<std::uint32_t>(vertex.resourcesNum, ShaderVertexStageInfo::MaxResources);
         mix(count);

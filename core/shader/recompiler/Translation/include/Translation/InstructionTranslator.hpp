@@ -5,7 +5,6 @@
 #include "RdnaDecoder/RdnaProgram.hpp"
 #include "IntermediateRepresentation/IrBuilder.hpp"
 #include "IntermediateRepresentation/IrProgram.hpp"
-#include "Translation/EmbeddedVertexFetch.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
 #include <cstdint>
 
@@ -32,7 +31,6 @@ struct TranslateOptions {
     std::uint64_t shaderHash = 0;
     bool fragmentShaderBarycentricEnabled = false;
     ShaderStageInputInfo inputInfo;
-    const EmbeddedFetchPlan* embeddedFetch = nullptr;
 };
 
 class InstructionTranslator {

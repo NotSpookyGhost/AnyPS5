@@ -153,11 +153,12 @@ private:
     }
 
     static void append(std::vector<std::uint64_t>& key, const ShaderVertexStageInfo& value) {
-        append(key, value.resourcesNum);
         append(key, value.fetchAttribReg);
         append(key, value.fetchBufferReg);
         append(key, value.fetchEmbedded);
         if (value.resourcesNum > value.resources.size()) throw std::runtime_error("Shader cache: invalid vertex resource count");
+        if (value.fetchEmbedded) return;
+        append(key, value.resourcesNum);
         for (std::uint32_t i = 0; i < value.resourcesNum; ++i) {
             append(key, value.resources[i].fields[1] & 0xffff0000u);
             append(key, value.resources[i].fields[3]);

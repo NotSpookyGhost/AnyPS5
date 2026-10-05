@@ -44,9 +44,6 @@ void validateTranslateOptions(const TranslateOptions& options) {
     if (options.waveSize != 32u && options.waveSize != 64u) {
         throw std::runtime_error("shader translation requires wave32 or wave64, got " + std::to_string(options.waveSize));
     }
-    if (options.embeddedFetch != nullptr && options.stage != ShaderStageKind::Vertex && options.stage != ShaderStageKind::Local) {
-        throw std::runtime_error("embedded vertex fetch requires a vertex or local shader");
-    }
     switch (options.stage) {
     case ShaderStageKind::Vertex:
     case ShaderStageKind::Local:
@@ -90,54 +87,6 @@ const ShaderWorkgroupInputInfo* shaderWorkgroupInput(ShaderStageKind stage, cons
 
 bool isCodeTableLoad(const ControlFlowGraph& cfg, std::uint32_t programCounter) {
     return std::find(cfg.codeTableLoadProgramCounters.begin(), cfg.codeTableLoadProgramCounters.end(), programCounter) != cfg.codeTableLoadProgramCounters.end();
-}
-
-const EmbeddedFetchLoad* findEmbeddedFetchLoad(const EmbeddedFetchPlan* plan, std::uint32_t programCounter) {
-    if (plan == nullptr) {
-        return nullptr;
-    }
-    const auto found = std::find_if(plan->loads.begin(), plan->loads.end(), [programCounter](const EmbeddedFetchLoad& load) {
-        return load.programCounter == programCounter;
-    });
-    return found != plan->loads.end() ? &*found : nullptr;
-}
-
-int resolveEmbeddedFetchResource(const ShaderVertexInputInfo& input, const EmbeddedFetchLoad& load) {
-    if (load.attributeId >= 0 && load.attributeId < input.resourcesNum && input.resourcesDst[load.attributeId].attrId == load.attributeId) {
-        return load.attributeId;
-    }
-    for (int index = 0; index < input.resourcesNum; index++) {
-        const auto& destination = input.resourcesDst[index];
-        if (destination.attrId == load.attributeId && load.componentCount <= static_cast<std::uint32_t>(std::max(destination.registersNum, 1))) {
-            return index;
-        }
-    }
-    for (int index = 0; index < input.resourcesNum; index++) {
-        if (input.resourcesDst[index].attrId == load.attributeId) {
-            return index;
-        }
-    }
-    return -1;
-}
-
-bool isBufferDwordLoad(RdnaOpcode opcode) {
-    switch (opcode) {
-    case RdnaOpcode::BufferLoadFormatX:
-    case RdnaOpcode::BufferLoadFormatXy:
-    case RdnaOpcode::BufferLoadFormatXyz:
-    case RdnaOpcode::BufferLoadFormatXyzw:
-    case RdnaOpcode::BufferLoadDword:
-    case RdnaOpcode::BufferLoadDwordx2:
-    case RdnaOpcode::BufferLoadDwordx3:
-    case RdnaOpcode::BufferLoadDwordx4:
-    case RdnaOpcode::TbufferLoadFormatX:
-    case RdnaOpcode::TbufferLoadFormatXy:
-    case RdnaOpcode::TbufferLoadFormatXyz:
-    case RdnaOpcode::TbufferLoadFormatXyzw:
-        return true;
-    default:
-        return false;
-    }
 }
 
 void includeInstructionVectorRegisters(const RdnaInstruction& instruction, std::uint32_t& vectorLimit) {
@@ -399,14 +348,6 @@ IrProgram InstructionTranslator::Translate(const RdnaProgram& decoded, const Con
     program.Resources().userDataBase = options.userDataBaseRegister;
     program.Resources().userDataCount = options.userDataCount;
     program.Info().scratchDwords = options.scratchDwords;
-    if (options.embeddedFetch != nullptr) {
-        program.Info().vertexOffsetSgpr = options.embeddedFetch->vertexOffsetSgpr;
-        program.Info().instanceOffsetSgpr = options.embeddedFetch->instanceOffsetSgpr;
-        program.Info().vertexOffsetShared = options.embeddedFetch->vertexOffsetShared;
-        program.Info().instanceOffsetShared = options.embeddedFetch->instanceOffsetShared;
-        program.Info().vertexOffsetConflict = options.embeddedFetch->vertexOffsetConflict;
-        program.Info().instanceOffsetConflict = options.embeddedFetch->instanceOffsetConflict;
-    }
     program.Metadata().cfgFailureKind = cfg.failureKind;
     program.Metadata().failureReason = cfg.unsupportedReason;
 
@@ -463,18 +404,6 @@ IrProgram InstructionTranslator::Translate(const RdnaProgram& decoded, const Con
                 const auto table = std::find_if(cfg.codeTableLoads.begin(), cfg.codeTableLoads.end(), [&](const auto& entry) { return entry.programCounter == instruction.programCounter; });
                 if (table == cfg.codeTableLoads.end()) throw std::runtime_error("missing shader code table values");
                 context.TranslateCodeTableLoad(instruction, *table);
-                continue;
-            }
-            const auto* embedded = findEmbeddedFetchLoad(options.embeddedFetch, instruction.programCounter);
-            if (embedded != nullptr && isBufferDwordLoad(instruction.op) && instruction.dataDwordCount == embedded->componentCount && instruction.destination.kind == RdnaOperandKind::VectorRegister) {
-                if (options.inputInfo.vertex == nullptr) {
-                    throw std::runtime_error("embedded vertex fetch requires vertex input metadata");
-                }
-                const auto resource = resolveEmbeddedFetchResource(*options.inputInfo.vertex, *embedded);
-                if (resource < 0 || resource >= options.inputInfo.vertex->resourcesNum) {
-                    throw std::runtime_error("embedded vertex fetch at program counter " + std::to_string(instruction.programCounter) + " has no resource for attribute " + std::to_string(embedded->attributeId));
-                }
-                context.TranslateEmbeddedFetch(instruction, static_cast<std::uint32_t>(resource), embedded->componentCount, options.inputInfo.vertex->resources[resource]);
                 continue;
             }
             context.TranslateInstruction(instruction);
