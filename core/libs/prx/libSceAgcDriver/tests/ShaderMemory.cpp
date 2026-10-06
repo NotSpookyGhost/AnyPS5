@@ -32,6 +32,16 @@
 
 namespace {
 
+ShaderRecompiler::SpirvTarget BufferTarget() {
+    static constexpr std::array<std::uint32_t, 5> capabilities{spv::CapabilityShader, spv::CapabilityImageGatherExtended, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    static constexpr std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
+    ShaderRecompiler::SpirvTarget target{};
+    target.bdaAbiVersion = ShaderRecompiler::BdaAbi::Version;
+    target.supportedCapabilities = capabilities;
+    target.supportedExtensions = extensions;
+    return target;
+}
+
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
@@ -558,6 +568,7 @@ void verifyProgramCounterRelativeData() {
     const auto codeAddress = reinterpret_cast<std::uintptr_t>(code.data());
     RecompileRequest request{};
     request.shader = {ShaderStage::Vertex, codeAddress, code, 0, {}};
+    request.target = BufferTarget();
     request.context.waveSize = 64;
     request.context.userDataBaseRegister = 8;
     request.context.vertex = ShaderVertexStageInfo{};
@@ -1053,10 +1064,10 @@ void verifyComputedTexelOffsets() {
     };
     const auto computed = program(0x100u, 0u);
     const auto constant = program(0xffu, 0x3fu | (1u << 8u));
-    const std::array<std::uint32_t, 2> withGather{1u, static_cast<std::uint32_t>(spv::CapabilityImageGatherExtended)};
     const auto recompile = [&](const std::vector<std::uint32_t>& code, bool offsets) {
         RecompileRequest request{};
         request.shader = {ShaderStage::Compute, 0x30000u, code, 0, {}};
+        request.target = BufferTarget();
         request.context.waveSize = 32;
         request.context.userDataBaseRegister = 0;
         request.context.userData = userData;
@@ -1064,7 +1075,6 @@ void verifyComputedTexelOffsets() {
         request.target.vulkanVersion = 0x00401000u;
         request.target.spirvVersion = 0x00010300u;
         request.target.subgroupSize = 32;
-        request.target.supportedCapabilities = withGather;
         request.target.fragmentShaderBarycentricEnabled = false;
         request.target.nonConstantImageOffsets = offsets;
         request.layout.pushConstantSizeBytes = 128;
@@ -1312,9 +1322,12 @@ void verifyTwoLaneUniformValues() {
     const auto srtAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(srt.data()));
     const std::array<std::uint32_t, 2> userData{static_cast<std::uint32_t>(srtAddress), static_cast<std::uint32_t>(srtAddress >> 32u)};
     const std::array<std::uint32_t, 10> code{0xf4040080u, 0xfa000000u, 0xf4080200u, 0xfa000010u, 0xbf8cc07fu, 0x93040302u, 0x4a020004u, 0xe0700000u, 0x80020100u, 0xbf810000u};
-    const auto multiplies = [&](std::uint32_t subgroupSize) {
+    const auto multiplies = [&](std::uint32_t subgroupSize, bool multiply) {
+        auto shaderCode = code;
+        if (!multiply) shaderCode[5] = 0x80040302u;
         RecompileRequest request{};
-        request.shader = {ShaderStage::Compute, 0x40000u, code, 0, {}};
+        request.shader = {ShaderStage::Compute, 0x40000u, shaderCode, 0, {}};
+        request.target = BufferTarget();
         request.context.waveSize = 64;
         request.context.userDataBaseRegister = 0;
         request.context.userData = userData;
@@ -1337,9 +1350,9 @@ void verifyTwoLaneUniformValues() {
         }
         return count;
     };
-    const auto oneLane = multiplies(64u);
-    require(oneLane != 0u, "two-lane uniform values: the scalar multiply is missing from the module");
-    require(multiplies(32u) == oneLane, "two-lane uniform values: a two-lane invocation computes a scalar value once per lane");
+    for (const auto subgroupSize : {32u, 64u}) {
+        require(multiplies(subgroupSize, true) == multiplies(subgroupSize, false) + 1, "two-lane uniform values: the scalar multiply must be emitted once per invocation");
+    }
 }
 
 void verifyBdaReadFallbackFunctions() {
@@ -1616,6 +1629,7 @@ int main(int argc, char** argv) {
         const std::array<std::uint32_t, 2> userData{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u)};
         RecompileRequest request{};
         request.shader = {ShaderStage::Vertex, 0x10000u, code, 0, {}};
+        request.target = BufferTarget();
         request.context.waveSize = 64;
         request.context.userDataBaseRegister = 8;
         request.context.userData = userData;
