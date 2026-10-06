@@ -1198,6 +1198,7 @@ void resourceTests() {
         ShaderRecompiler::RecompileResult fragment;
         vertex.bindings.push_back(makeBinding(Role::GuestBuffers, 0, 2, join(vsharp(guestFirst.data(), 16), vsharp(guestSecond.data(), 32))));
         vertex.bindings.push_back(makeBinding(Role::ShaderData, 5, 1, ShaderDataWords({7, 8, 9})));
+        vertex.shaderDataDwords = ShaderRecompiler::RuntimeAbi::ShaderDataDwords;
         fragment.bindings.push_back(makeBinding(Role::FlattenedSrt, 43, 1, {1, 2}));
         fragment.bindings.push_back(makeBinding(Role::GuestBuffers, 44, 1, vsharp(guestThird.data(), 8)));
         AgcDriver::Graphics::ShaderResources resources(context, vertex, fragment, state.color, 0, 0);
@@ -1303,8 +1304,8 @@ void resourceTests() {
     expectSingleFailure(changed([](auto& binding) { binding.count = 2; }), "four DWORDs per array element");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; binding.count = 2; binding.guestDescriptor = {1, 2}; }), "must not be arrays");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; binding.guestDescriptor.clear(); }), "empty shader data descriptor");
-    expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; }), "fixed runtime ABI");
-    expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; binding.guestDescriptor = ShaderDataWords({}); binding.guestDescriptor[0] = 0u; }), "incompatible version");
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; }), "compact runtime layout");
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::ShaderData; binding.guestDescriptor = ShaderDataWords({}); binding.guestDescriptor.pop_back(); }), "compact runtime layout");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::FlattenedSrt; binding.guestDescriptor.clear(); }), "empty shader data descriptor");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x40000000u; }), "reserved bits");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[3] |= 0x40000000u; }), "unsupported type");
@@ -1357,6 +1358,7 @@ void misalignedShaderDataTests() {
         ShaderRecompiler::RecompileResult compute;
         compute.bindings.push_back(makeBinding(Role::GuestBuffers, 0, 2, join(vsharp(guest.data(), 32), vsharp(guest.data() + 1, 8))));
         compute.bindings.push_back(makeBinding(Role::ShaderData, 1, 1, ShaderDataWords({0x11, 0x22})));
+        compute.shaderDataDwords = ShaderRecompiler::RuntimeAbi::ShaderDataDwords;
         compute.memoryOffsetDword = ShaderRecompiler::RuntimeAbi::BufferOffsetsDword;
         auto live = compute;
         live.bindings[1].guestDescriptor = ShaderDataWords({0x33, 0x44});

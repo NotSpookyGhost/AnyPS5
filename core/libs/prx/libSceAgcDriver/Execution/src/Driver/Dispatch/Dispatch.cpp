@@ -49,6 +49,14 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         packet = resolved;
         indirectArguments = 0;
     }
+    if (fillBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice)) {
+        pendingDispatchPhases().outcome = DispatchOutcome::FillHle;
+        return;
+    }
+    if (indirectArguments == 0 && copyBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice, address)) {
+        pendingDispatchPhases().outcome = DispatchOutcome::CopyHle;
+        return;
+    }
     if (indirectArguments == 0 && (packet[4] & 0x20u) != 0) {
         const std::array<std::uint32_t, 3> threads{packet[1], packet[2], packet[3]};
         for (std::uint32_t axis = 0; axis < 3; ++axis) {
@@ -95,15 +103,6 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         explicit ProbeScope(bool active) : active(active) { if (active) ShaderRecompiler::SetDebugProbeActive(true); }
         ~ProbeScope() { if (active) ShaderRecompiler::SetDebugProbeActive(false); }
     } probeScope{probeThis};
-    const auto invocation = InvocationFor(snapshot, codeOffset, request);
-    if (fillBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice)) {
-        pendingDispatchPhases().outcome = DispatchOutcome::FillHle;
-        return;
-    }
-    if (indirectArguments == 0 && copyBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice, address)) {
-        pendingDispatchPhases().outcome = DispatchOutcome::CopyHle;
-        return;
-    }
     const bool noDispatchCache = noDispatchCacheEnv || probeThis;
     std::uint64_t key = 0xcbf29ce484222325ull;
     const auto mix = [&](std::uint64_t value) {
@@ -178,10 +177,11 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         previous.key = key;
     }
 
-    if (!stampValidate()) mix(reinterpret_cast<std::uintptr_t>(registeredShader.get()));
+    mix(reinterpret_cast<std::uintptr_t>(registeredShader.get()));
     phaseTiming.Phase(PhaseKey);
     lookupDispatch(address, submission, key, noDispatchCache, traceCache, profile, memory, phaseTiming, phaseMs, compiledResult, keepVariant, captured, liveWords, dataHit, cached, validated, missedEntry, missedDiffering);
     if (cached) {
+        require(keepVariant != nullptr && keepVariant->shader == it->second, "dispatch cache belongs to another registered shader");
         captureMs += phaseTiming.Elapsed();
     } else {
         shaderMemory = std::make_shared<ShaderMemory>(memory, &queryPendingWrite, &observePendingWrite, hookWaitCounter());
@@ -189,6 +189,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
 
         static const bool dumpShaders = std::getenv("APS5_DUMP_SHADERS") != nullptr;
         try {
+            const auto invocation = InvocationFor(snapshot, codeOffset, request);
 
             const auto waitedBefore = traceCapSync() ? Graphics::Recorder::ThreadWaitedMs() : 0.0;
             forgetAtCapture = GuestMemory::ForgetSerial();

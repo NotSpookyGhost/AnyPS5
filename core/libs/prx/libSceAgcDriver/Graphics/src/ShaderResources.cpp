@@ -888,23 +888,34 @@ namespace {
 
 void ValidateRuntimeResources(const CompiledShader& shader) {
     Require(shader.program != nullptr, "missing compiled shader");
-    const auto& descriptors = shader.program->bindings;
-    for (const auto& dataBinding : descriptors) {
-        if (dataBinding.role != ShaderRecompiler::DescriptorRole::ShaderData) continue;
-        Require(dataBinding.guestDescriptor.size() == ShaderRecompiler::RuntimeAbi::ShaderDataDwords, "invalid runtime resource metadata size");
-        ShaderRecompiler::RuntimeAbi::ShaderData data{};
-        std::memcpy(&data, dataBinding.guestDescriptor.data(), sizeof(data));
-        ShaderRecompiler::RuntimeAbi::RequireVersion(data.version);
-        Require(data.imageCount <= data.images.size() && data.samplerCount <= data.samplers.size(), "runtime resource metadata capacity exceeded");
-        const auto stageBase = dataBinding.binding - dataBinding.binding % static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count);
-        const auto validate = [&](const ShaderRecompiler::RuntimeAbi::ResourceMetadata& metadata, ShaderRecompiler::DescriptorRole role) {
-            Require(metadata.binding < static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count), "invalid runtime heap binding");
-            const auto found = std::ranges::find_if(descriptors, [&](const ShaderRecompiler::DescriptorBinding& binding) { return binding.binding == stageBase + metadata.binding && binding.role == role; });
-            Require(found != descriptors.end(), "runtime metadata references an unbound heap");
-            Require(metadata.elementCount != 0u && metadata.firstElement < found->count && metadata.elementCount <= found->count - metadata.firstElement, "runtime metadata exceeds its bound heap");
-        };
-        for (std::uint32_t i = 0u; i < data.imageCount; ++i) validate(data.images[i], ShaderRecompiler::DescriptorRole::GuestImages);
-        for (std::uint32_t i = 0u; i < data.samplerCount; ++i) validate(data.samplers[i], ShaderRecompiler::DescriptorRole::GuestSamplers);
+    const auto& program = *shader.program;
+    const auto& descriptors = program.bindings;
+    constexpr auto bindingCount = static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count);
+    std::array<const ShaderRecompiler::DescriptorBinding*, bindingCount> heaps{};
+    if (program.runtimeImageCount != 0u) {
+        for (const auto& binding : descriptors) {
+            if (binding.role != ShaderRecompiler::DescriptorRole::GuestImages) continue;
+            auto& heap = heaps[binding.binding % bindingCount];
+            Require(heap == nullptr, "duplicate runtime image binding");
+            heap = &binding;
+        }
+    }
+    for (const auto& binding : descriptors) {
+        if (binding.role != ShaderRecompiler::DescriptorRole::ShaderData) continue;
+        Require(binding.guestDescriptor.size() == program.shaderDataDwords, "invalid compact shader data size");
+        const auto words = std::span<const std::uint32_t>(binding.guestDescriptor);
+        constexpr auto metadataWords = sizeof(ShaderRecompiler::RuntimeAbi::ResourceMetadata) / sizeof(std::uint32_t);
+        Require(program.imageMetadataDword <= words.size() && program.runtimeImageCount <= (words.size() - program.imageMetadataDword) / metadataWords, "runtime image metadata exceeds shader data");
+        for (const auto index : program.runtimeImageResources) {
+            Require(index < program.runtimeImageCount, "runtime image resource exceeds its compact layout");
+            const auto offset = program.imageMetadataDword + index * metadataWords;
+            const auto kind = words[offset];
+            const auto first = words[offset + 1u];
+            const auto count = words[offset + 2u];
+            Require(count != 0u, "runtime image metadata has no descriptor elements");
+            Require(kind < heaps.size() && heaps[kind] != nullptr, "runtime metadata references an unbound image heap");
+            Require(first < heaps[kind]->count && count <= heaps[kind]->count - first, "runtime metadata exceeds its bound heap");
+        }
     }
 }
 
@@ -922,7 +933,6 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
         if (shaders.size() == 1u) refreshResourceKey = ContentKey(shaders.front(), false, true);
         std::set<std::uint32_t> occupied;
         for (const auto& shader : shaders) {
-            ValidateRuntimeResources(shader);
             Require(shader.program != nullptr, "missing compiled shader");
             ShaderRecompiler::RuntimeAbi::RequireVersion(shader.program->runtimeAbiVersion);
             const VkShaderStageFlags flags = VulkanStage(shader.stage);
@@ -985,14 +995,14 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
                     Require(binding.count == 1, "shader data and flattened SRT descriptors must not be arrays");
                     Require(!binding.guestDescriptor.empty(), "empty shader data descriptor");
                     if (binding.role == ShaderRecompiler::DescriptorRole::ShaderData) {
-                        Require(binding.guestDescriptor.size() == ShaderRecompiler::RuntimeAbi::ShaderDataDwords, "shader data does not match the fixed runtime ABI");
-                        ShaderRecompiler::RuntimeAbi::RequireVersion(binding.guestDescriptor[0]);
+                        Require(binding.guestDescriptor.size() == shader.program->shaderDataDwords, "shader data does not match the compact runtime layout");
                     }
                     item.allocations.push_back(addDataBuffer(binding.guestDescriptor));
                     if (binding.role == ShaderRecompiler::DescriptorRole::ShaderData) shaderData = static_cast<std::int64_t>(item.allocations.back());
                 }
                 bindings.push_back(std::move(item));
             }
+            ValidateRuntimeResources(shader);
             for (const auto index : offsetsInData) allocations[index].dataAllocation = shaderData;
             for (auto index = firstDeferred; index < deferredImages.size(); ++index) {
                 deferredImages[index].firstSampler = firstSampler;
@@ -1131,7 +1141,7 @@ void ShaderResources::buildComplete() {
                             if (index == std::numeric_limits<std::size_t>::max()) images.push_back({VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL});
                             else images.push_back({VK_NULL_HANDLE, textureFirstLayer[index] ? textures[index]->FirstLayerView() : textures[index]->View(), textures[index]->Layout()});
                         }
-                        for (auto slot = binding.imageAllocations.size(); slot < binding.layout.descriptorCount; ++slot) images.push_back({VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL});
+                        Require(binding.imageAllocations.size() == binding.layout.descriptorCount, "descriptor allocations disagree with compact binding");
                         break;
                     case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
                         write.pImageInfo = images.data() + images.size();
@@ -1139,12 +1149,12 @@ void ShaderResources::buildComplete() {
                             if (index == std::numeric_limits<std::size_t>::max()) images.push_back({VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL});
                             else images.push_back({VK_NULL_HANDLE, storageAtomic64[index] ? storageTextures[index]->Atomic64View(storageMips[index], storageFirstLayer[index]) : storageAtomic[index] ? storageTextures[index]->AtomicView(storageMips[index], storageFirstLayer[index]) : storageTextures[index]->StorageView(storageMips[index], storageFirstLayer[index]), VK_IMAGE_LAYOUT_GENERAL});
                         }
-                        for (auto slot = binding.imageAllocations.size(); slot < binding.layout.descriptorCount; ++slot) images.push_back({VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL});
+                        Require(binding.imageAllocations.size() == binding.layout.descriptorCount, "descriptor allocations disagree with compact binding");
                         break;
                     case VK_DESCRIPTOR_TYPE_SAMPLER:
                         write.pImageInfo = images.data() + images.size();
                         for (const auto index : binding.imageAllocations) images.push_back({samplers[index]->Handle(), VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED});
-                        for (auto slot = binding.imageAllocations.size(); slot < binding.layout.descriptorCount; ++slot) images.push_back({paddingSampler->Handle(), VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED});
+                        Require(binding.imageAllocations.size() == binding.layout.descriptorCount, "descriptor allocations disagree with compact binding");
                         break;
                     default: throw std::runtime_error("AGC graphics: ShaderResources encountered an unknown descriptor type while writing the descriptor set");
                 }
@@ -1248,39 +1258,38 @@ void ShaderResources::reportDescriptorCaches() const {
     AgcDriver::ProfilePrint_nid_no_patch("[descriptors] layouts %llu hits / %llu created, sets %llu from %llu pools, samplers %llu hits / %llu created\n", static_cast<unsigned long long>(descriptors.layoutHits), static_cast<unsigned long long>(descriptors.layoutMisses), static_cast<unsigned long long>(descriptors.sets), static_cast<unsigned long long>(descriptors.pools), static_cast<unsigned long long>(samplerHits), static_cast<unsigned long long>(samplerMisses));
 }
 
-std::vector<std::uint32_t> ShaderResources::ContentKey(const CompiledShader& shader, bool dataWords, bool movableBuffers) {
+template<typename TVisitor>
+void VisitContentKey(const CompiledShader& shader, bool dataWords, bool movableBuffers, const TVisitor& visit) {
     Require(shader.program != nullptr, "missing compiled shader");
     const auto& program = *shader.program;
-    std::vector<std::uint32_t> key;
-    key.reserve(8 + program.bindings.size() * 12);
-    key.push_back(dataWords ? 1u : 0u);
-    key.push_back(static_cast<std::uint32_t>(shader.stage));
-    key.push_back(static_cast<std::uint32_t>(program.PipelineVariantId()));
-    key.push_back(static_cast<std::uint32_t>(program.PipelineVariantId() >> 32u));
-    key.push_back(static_cast<std::uint32_t>(program.bindings.size()));
+    visit(dataWords ? 1u : 0u);
+    visit(static_cast<std::uint32_t>(shader.stage));
+    visit(static_cast<std::uint32_t>(program.PipelineVariantId()));
+    visit(static_cast<std::uint32_t>(program.PipelineVariantId() >> 32u));
+    visit(static_cast<std::uint32_t>(program.bindings.size()));
     const auto packBits = [&](const std::vector<bool>& bits) {
-        key.push_back(static_cast<std::uint32_t>(bits.size()));
+        visit(static_cast<std::uint32_t>(bits.size()));
         std::uint32_t word = 0;
         for (std::size_t i = 0; i < bits.size(); ++i) {
             if (bits[i]) word |= 1u << (i % 32u);
             if (i % 32u == 31u || i + 1 == bits.size()) {
-                key.push_back(word);
+                visit(word);
                 word = 0;
             }
         }
     };
     for (const auto& binding : program.bindings) {
-        key.insert(key.end(), {static_cast<std::uint32_t>(binding.kind), static_cast<std::uint32_t>(binding.role), binding.descriptorSet, binding.binding, binding.count, binding.readOnly ? 1u : 0u, binding.imageShape.has_value() ? static_cast<std::uint32_t>(*binding.imageShape) + 1u : 0u, static_cast<std::uint32_t>(binding.guestDescriptor.size())});
+        for (const auto word : {static_cast<std::uint32_t>(binding.kind), static_cast<std::uint32_t>(binding.role), binding.descriptorSet, binding.binding, binding.count, binding.readOnly ? 1u : 0u, binding.imageShape.has_value() ? static_cast<std::uint32_t>(*binding.imageShape) + 1u : 0u, static_cast<std::uint32_t>(binding.guestDescriptor.size())}) visit(word);
         if (movableBuffers && binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers && binding.guestDescriptor.size() == static_cast<std::size_t>(binding.count) * 4u) {
             for (std::uint32_t element = 0; element < binding.count; ++element) {
                 const auto* words = binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 4u;
                 const bool written = element >= binding.bufferWritten.size() || binding.bufferWritten[element];
                 const bool empty = words[2] == 0 || (words[0] == 0 && (words[1] & 0xffffu) == 0);
-                if (written || empty) key.insert(key.end(), words, words + 4);
-                else key.insert(key.end(), {0u, words[1] & 0xffff0000u, 0u, words[3]});
+                if (written || empty) { for (std::uint32_t index = 0; index < 4u; ++index) visit(words[index]); }
+                else { for (const auto word : {0u, words[1] & 0xffff0000u, 0u, words[3]}) visit(word); }
             }
         } else if ((dataWords && !movableBuffers) || !DataRole(binding.role)) {
-            key.insert(key.end(), binding.guestDescriptor.begin(), binding.guestDescriptor.end());
+            for (const auto word : binding.guestDescriptor) visit(word);
         }
         packBits(binding.imageWritten);
         packBits(binding.samplerDepthCompare);
@@ -1291,10 +1300,27 @@ std::vector<std::uint32_t> ShaderResources::ContentKey(const CompiledShader& sha
         // Read-only elements are bound without a write set: an object built for one written set
         // must not serve a build with another (the variant implies it, this makes it explicit).
         packBits(binding.bufferWritten);
-        key.push_back(static_cast<std::uint32_t>(binding.imageSamplers.size()));
-        key.insert(key.end(), binding.imageSamplers.begin(), binding.imageSamplers.end());
+        visit(static_cast<std::uint32_t>(binding.imageSamplers.size()));
+        for (const auto sampler : binding.imageSamplers) visit(sampler);
     }
+}
+
+std::vector<std::uint32_t> ShaderResources::ContentKey(const CompiledShader& shader, bool dataWords, bool movableBuffers) {
+    Require(shader.program != nullptr, "missing compiled shader");
+    std::vector<std::uint32_t> key;
+    key.reserve(8u + shader.program->bindings.size() * 12u);
+    VisitContentKey(shader, dataWords, movableBuffers, [&](std::uint32_t word) { key.push_back(word); });
     return key;
+}
+
+bool MatchesContentKey(const CompiledShader& shader, std::span<const std::uint32_t> key) {
+    std::size_t cursor = 0;
+    bool equal = true;
+    VisitContentKey(shader, false, true, [&](std::uint32_t word) {
+        equal &= cursor < key.size() && key[cursor] == word;
+        ++cursor;
+    });
+    return equal && cursor == key.size();
 }
 
 namespace {
@@ -2384,8 +2410,7 @@ bool ShaderResources::DataWordsDiffer(const CompiledShader& shader) const {
 
 bool ShaderResources::RefreshData(VkCommandBuffer commands, const CompiledShader& shader, Recorder* recorder) {
     Require(shader.program != nullptr, "missing compiled shader");
-    Require(!refreshResourceKey.empty() && refreshResourceKey == ContentKey(shader, false, true), "runtime data refresh cannot replace bound resources");
-    ValidateRuntimeResources(shader);
+    Require(!refreshResourceKey.empty() && MatchesContentKey(shader, refreshResourceKey), "runtime data refresh cannot replace bound resources");
     const auto& program = *shader.program;
     Require(program.bindings.size() == bindings.size(), "template bindings disagree with the shader");
     bool recorded = false;
@@ -2401,6 +2426,7 @@ bool ShaderResources::RefreshData(VkCommandBuffer commands, const CompiledShader
         const auto size = binding.guestDescriptor.size() * sizeof(std::uint32_t);
         Require(allocation.buffer != nullptr && !allocation.guest && allocation.size == size && size <= MaxRefreshBytes, "template data buffer cannot take the dispatch's words");
         if (allocation.dataWords.size() == binding.guestDescriptor.size() && std::equal(allocation.dataWords.begin(), allocation.dataWords.end(), binding.guestDescriptor.begin())) continue;
+        if (binding.role == ShaderRecompiler::DescriptorRole::ShaderData) ValidateRuntimeResources(shader);
         if (recorder != nullptr && timing == Recorder::NoTiming) timing = recorder->BeginGpuTiming(Recorder::CommandClass::TemplateDataRefresh);
         writeDataWords(commands, bindings[index].allocations.front(), binding.guestDescriptor);
         allocation.dataWords.assign(binding.guestDescriptor.begin(), binding.guestDescriptor.end());
@@ -2434,8 +2460,8 @@ void ShaderResources::PrecollectSurfaces() const {
 void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding& binding, VkShaderStageFlags flags) {
     Require(binding.count != 0, "empty descriptor binding");
     const auto heap = static_cast<ShaderRecompiler::RuntimeAbi::Binding>(binding.binding % static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count));
-    const auto capacity = ShaderRecompiler::RuntimeAbi::HeapCapacity(heap);
-    Require(binding.count <= capacity, "typed descriptor heap capacity exceeded");
+    const auto capacity = binding.count;
+    Require(binding.count <= ShaderRecompiler::RuntimeAbi::HeapCapacity(heap), "typed descriptor heap capacity exceeded");
     const auto localBinding = static_cast<std::uint32_t>(heap);
     const bool sampledHeap = localBinding >= ShaderRecompiler::RuntimeAbi::FirstImageBinding && localBinding < ShaderRecompiler::RuntimeAbi::FirstStorageImageBinding;
     const bool storageHeap = localBinding >= ShaderRecompiler::RuntimeAbi::FirstStorageImageBinding && localBinding < static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Samplers);
@@ -2472,10 +2498,6 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
     } else {
         Require(elementWords == 4, "guest sampler descriptor must contain 4 dwords");
         Require(capacity <= context.limits.maxPerStageDescriptorSamplers, "shader sampler descriptors exceed per-stage limits");
-        if (paddingSampler == nullptr) {
-            constexpr std::array<std::uint32_t, 4> defaultSampler{};
-            paddingSampler = std::make_shared<Sampler>(context, DecodeSamplerResource(defaultSampler));
-        }
         Require(binding.samplerDepthCompare.size() == binding.count, "guest sampler binding is missing depth comparison metadata");
         Require(binding.samplerUnnormalized.empty() || binding.samplerUnnormalized.size() == binding.count, "guest sampler binding has unnormalized coordinate metadata of another size");
         for (std::uint32_t element = 0; element < binding.count; ++element) {

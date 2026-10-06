@@ -86,6 +86,8 @@ struct GuestBufferMemory::AddressSpace {
     std::vector<CopiedRange> copied;
     // The BDA table entries of `base`, in its order.
     std::vector<ShaderRecompiler::BdaAbi::Range> ranges;
+    mutable std::mutex tableMutex;
+    mutable std::map<std::vector<std::pair<std::uint64_t, std::uint64_t>>, std::pair<std::uint64_t, std::shared_ptr<const std::vector<ShaderRecompiler::BdaAbi::Range>>>> writeTables;
 };
 
 namespace {
@@ -2480,42 +2482,70 @@ std::vector<ShaderRecompiler::BdaAbi::Range> GuestBufferMemory::AddressRanges() 
     std::vector<ShaderRecompiler::BdaAbi::Range> result;
     result.reserve(regions.size() + (space != nullptr ? space->ranges.size() : 0));
     for (const auto& region : regions) result.push_back(addressRange(region));
-    if (space != nullptr) result.insert(result.end(), space->ranges.begin(), space->ranges.end());
-    std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) { return left.begin < right.begin; });
+    if (space != nullptr) {
+        std::vector<ShaderRecompiler::BdaAbi::Range> combined;
+        combined.reserve(result.size() + space->ranges.size());
+        std::merge(space->ranges.begin(), space->ranges.end(), result.begin(), result.end(), std::back_inserter(combined), [](const auto& left, const auto& right) { return left.begin < right.begin; });
+        result = std::move(combined);
+    }
+    if (writes.empty()) return result;
+    auto sortedWrites = writes;
+    std::sort(sortedWrites.begin(), sortedWrites.end());
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> intervals;
+    for (const auto& interval : sortedWrites) {
+        if (!intervals.empty() && interval.first <= intervals.back().second) intervals.back().second = std::max(intervals.back().second, interval.second);
+        else intervals.push_back(interval);
+    }
     std::vector<ShaderRecompiler::BdaAbi::Range> merged;
+    merged.reserve(result.size() + intervals.size() * 2u);
+    std::size_t firstWrite = 0;
     for (const auto& range : result) {
         if ((range.permissions & ShaderRecompiler::BdaAbi::Write) != 0u) {
             merged.push_back(range);
             continue;
         }
-        std::vector<std::uint64_t> boundaries{range.begin, range.end};
-        for (const auto& [begin, end] : writes) {
-            if (begin >= range.end || end <= range.begin) continue;
-            boundaries.push_back(std::max(begin, range.begin));
-            boundaries.push_back(std::min(end, range.end));
-        }
-        std::sort(boundaries.begin(), boundaries.end());
-        boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
-        for (std::size_t index = 1; index < boundaries.size(); ++index) {
+        while (firstWrite < intervals.size() && intervals[firstWrite].second <= range.begin) ++firstWrite;
+        auto cursor = range.begin;
+        const auto append = [&](std::uint64_t end, bool written) {
+            if (cursor == end) return;
             auto part = range;
-            part.begin = boundaries[index - 1];
-            part.end = boundaries[index];
-            part.deviceAddress += part.begin - range.begin;
-            if (WritesOverlap(part.begin, static_cast<std::size_t>(part.end - part.begin))) {
-                const auto* region = owner(part.begin);
+            part.begin = cursor;
+            part.end = end;
+            part.deviceAddress += cursor - range.begin;
+            if (written) {
+                const auto* region = owner(cursor);
                 Require(region != nullptr && region->writable && (region->mirror == nullptr || region->mirror->writable), "runtime buffer write has no writable GPU owner");
                 part.permissions |= ShaderRecompiler::BdaAbi::Write;
             }
             merged.push_back(part);
+            cursor = end;
+        };
+        for (auto index = firstWrite; index < intervals.size() && intervals[index].first < range.end; ++index) {
+            append(std::max(cursor, intervals[index].first), false);
+            append(std::min(range.end, intervals[index].second), true);
         }
+        append(range.end, false);
     }
     return merged;
 }
 
 std::optional<GuestBufferMemory::CachedTable> GuestBufferMemory::CachedAddressTable() const {
-    if (space == nullptr || !regions.empty() || !writes.empty()) return std::nullopt;
+    if (space == nullptr || !regions.empty()) return std::nullopt;
     Require(uploaded && !committed, "guest GPU address ranges are not available");
-    return CachedTable{space->serial, &space->ranges};
+    if (writes.empty()) return CachedTable{space->serial, &space->ranges};
+    if (writeTableRanges != nullptr) return CachedTable{writeTableSerial, writeTableRanges.get()};
+    std::lock_guard lock(space->tableMutex);
+    const auto found = space->writeTables.find(writes);
+    if (found != space->writeTables.end()) {
+        writeTableSerial = found->second.first;
+        writeTableRanges = found->second.second;
+    } else {
+        writeTableRanges = std::make_shared<const std::vector<ShaderRecompiler::BdaAbi::Range>>(AddressRanges());
+        writeTableSerial = Spaces().serials.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (space->writeTables.size() >= 64u) space->writeTables.erase(space->writeTables.begin());
+        space->writeTables.emplace(writes, std::pair{writeTableSerial, writeTableRanges});
+    }
+    return CachedTable{writeTableSerial, writeTableRanges.get()};
 }
 
 bool GuestBufferMemory::HasCopiedWrites() const {

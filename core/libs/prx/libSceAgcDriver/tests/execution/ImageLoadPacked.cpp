@@ -143,7 +143,7 @@ void Run(AgcDriver::VulkanDevice& device, std::uint32_t format, std::uint32_t sw
     const auto result = ShaderRecompiler::Recompile(request);
     static ShaderRecompiler::CompiledShaderArtifact first;
     if (first.variantId == 0u) first = result;
-    else Require(result.cacheHit && result.variantId == first.variantId && result.spirv.data() == first.spirv.Words().data(), "runtime image format changed the compiled artifact");
+    else Require(result.cacheHit && result.variantId == first.variantId, "runtime image format changed the compiled artifact");
     device.Dispatch(result, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(code.data()));
     device.WaitIdle();
 }

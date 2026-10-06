@@ -460,7 +460,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
             const auto heap = static_cast<ShaderRecompiler::RuntimeAbi::Binding>(binding->binding % static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count));
             const auto capacity = ShaderRecompiler::RuntimeAbi::HeapCapacity(heap);
             const auto count = module.constants.find(type[3]);
-            Require(binding->count != 0u && binding->count <= capacity && count != module.constants.end() && count->second == capacity, "typed heap array length disagrees with runtime ABI");
+            Require(binding->count != 0u && binding->count <= capacity && count != module.constants.end() && count->second == binding->count, "typed heap array length disagrees with compact binding");
         } else {
             Require(variable.storage == spv::StorageClassStorageBuffer && decoration.set && decoration.binding, "unsupported or unbound shader resource");
             const auto key = std::make_pair(*decoration.set, *decoration.binding);

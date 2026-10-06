@@ -11,6 +11,7 @@
 #include "ShaderDiskCache.hpp"
 #include <list>
 #include <map>
+#include <set>
 #include <mutex>
 #include <new>
 #include <shared_mutex>
@@ -336,6 +337,12 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
 
     result.bdaAbiVersion = program.Info().usesDma ? request.target.bdaAbiVersion : 0u;
     result.memoryOffsetDword = bindings.layout.memoryOffsetDword;
+    result.shaderDataDwords = bindings.layout.ShaderDataDwords();
+    result.imageMetadataDword = bindings.layout.ImageMetadataDword();
+    result.runtimeImageCount = bindings.layout.runtimeImageCount;
+    for (std::uint32_t index = 0; index < program.Info().images.size(); ++index) {
+        if (program.Info().images[index].indirectRoot != ImageResource::NoIndirectImage) result.runtimeImageResources.push_back(index);
+    }
     result.hostSubgroupSize = HostSubgroupSize(request);
     result.vertexOffsetSgpr = program.Info().vertexOffsetSgpr;
     result.instanceOffsetSgpr = program.Info().instanceOffsetSgpr;
@@ -398,14 +405,102 @@ std::uint64_t specializationId(std::uint64_t artifact, std::span<const PipelineS
     return entry->second;
 }
 
-SharedSpirv specializeVertexInputs(const CompiledShaderArtifact& artifact, std::span<const std::uint32_t> classes) {
-    if (artifact.vertexInputPatches.empty()) return artifact.spirv;
+struct SpecializedModule {
+    SharedSpirv spirv;
+    std::vector<std::uint32_t> bindings;
+    bool pushData = false;
+};
+
+std::shared_ptr<const SpecializedModule> specializeModule(const CompiledShaderArtifact& artifact, std::span<const std::uint32_t> classes, std::span<const PipelineSpecializationConstant> constants, std::uint64_t id, const SpirvTarget& target) {
     static std::mutex mutex;
-    static std::map<std::pair<std::uint64_t, std::vector<std::uint32_t>>, SharedSpirv> modules;
-    std::pair key{artifact.variantId, std::vector<std::uint32_t>(classes.begin(), classes.end())};
+    static std::map<std::uint64_t, std::shared_ptr<const SpecializedModule>> modules;
+    {
+        std::lock_guard lock(mutex);
+        if (const auto found = modules.find(id); found != modules.end()) return found->second;
+    }
+    auto source = SpecializeVertexInputTypes(artifact, classes);
+    std::map<std::uint32_t, std::uint32_t> supplied;
+    for (const auto& constant : constants) {
+        if (!supplied.emplace(constant.id, constant.value).second) throw std::runtime_error("duplicate prepared specialization ID");
+    }
+    std::map<std::uint32_t, std::uint32_t> values;
+    const auto& words = source.Words();
+    if (words.size() < 5u || words[0] != spv::MagicNumber) throw std::runtime_error("invalid prepared specialization module");
+    for (std::size_t cursor = 5; cursor < words.size();) {
+        const auto count = words[cursor] >> 16u;
+        const auto op = static_cast<spv::Op>(words[cursor] & 0xffffu);
+        if (count == 0u || count > words.size() - cursor) throw std::runtime_error("truncated prepared specialization instruction");
+        if (op == spv::OpDecorate && count == 4u && words[cursor + 2u] == spv::DecorationSpecId) {
+            const auto found = supplied.find(words[cursor + 3u]);
+            if (found == supplied.end() || !values.emplace(words[cursor + 1u], found->second).second) throw std::runtime_error("missing or duplicate prepared specialization value");
+        }
+        cursor += count;
+    }
+    std::vector<std::uint32_t> materialized(words.begin(), words.begin() + 5);
+    for (std::size_t cursor = 5; cursor < words.size();) {
+        const auto count = words[cursor] >> 16u;
+        const auto op = static_cast<spv::Op>(words[cursor] & 0xffffu);
+        if (op == spv::OpSpecConstant) {
+            if (count != 4u || !values.contains(words[cursor + 2u])) throw std::runtime_error("invalid prepared specialization constant");
+            materialized.insert(materialized.end(), {(4u << 16u) | spv::OpConstant, words[cursor + 1u], words[cursor + 2u], values.at(words[cursor + 2u])});
+        } else if (!(op == spv::OpDecorate && count == 4u && words[cursor + 2u] == spv::DecorationSpecId)) {
+            materialized.insert(materialized.end(), words.begin() + cursor, words.begin() + cursor + count);
+        }
+        cursor += count;
+    }
+#if ANYPS5_ENABLE_SPIRV_TOOLS
+    materialized = ValidateAndOptimizeSpirv(materialized, target.vulkanVersion, target.spirvVersion, target.nonConstantImageOffsets, true, true);
+#else
+    throw std::runtime_error("prepared shader materialization requires SPIRV-Tools");
+#endif
+    std::map<std::uint32_t, std::uint32_t> descriptorVariables;
+    std::set<std::uint32_t> usedDescriptors;
+    for (std::size_t cursor = 5; cursor < materialized.size();) {
+        const auto count = materialized[cursor] >> 16u;
+        const auto op = static_cast<spv::Op>(materialized[cursor] & 0xffffu);
+        if (op == spv::OpDecorate && count == 4u && materialized[cursor + 2u] == spv::DecorationBinding) descriptorVariables.emplace(materialized[cursor + 1u], materialized[cursor + 3u]);
+        if ((op == spv::OpAccessChain || op == spv::OpInBoundsAccessChain || op == spv::OpPtrAccessChain || op == spv::OpInBoundsPtrAccessChain || op == spv::OpLoad || op == spv::OpCopyObject) && count >= 4u) usedDescriptors.insert(materialized[cursor + 3u]);
+        cursor += count;
+    }
+    const auto unused = [&](std::uint32_t id) { return descriptorVariables.contains(id) && !usedDescriptors.contains(id); };
+    std::vector<std::uint32_t> compact(materialized.begin(), materialized.begin() + 5);
+    for (std::size_t cursor = 5; cursor < materialized.size();) {
+        const auto count = materialized[cursor] >> 16u;
+        const auto op = static_cast<spv::Op>(materialized[cursor] & 0xffffu);
+        if (op == spv::OpEntryPoint) {
+            const auto start = compact.size();
+            std::size_t interfaceIndex = 3u;
+            for (; interfaceIndex < count; ++interfaceIndex) {
+                const auto word = materialized[cursor + interfaceIndex];
+                if ((word & 0xffu) == 0u || (word & 0xff00u) == 0u || (word & 0xff0000u) == 0u || (word & 0xff000000u) == 0u) { ++interfaceIndex; break; }
+            }
+            compact.insert(compact.end(), materialized.begin() + cursor, materialized.begin() + cursor + interfaceIndex);
+            for (auto index = interfaceIndex; index < count; ++index) if (!unused(materialized[cursor + index])) compact.push_back(materialized[cursor + index]);
+            compact[start] = (static_cast<std::uint32_t>(compact.size() - start) << 16u) | spv::OpEntryPoint;
+        } else if (!((op == spv::OpVariable && unused(materialized[cursor + 2u])) || ((op == spv::OpDecorate || op == spv::OpName) && unused(materialized[cursor + 1u])))) {
+            compact.insert(compact.end(), materialized.begin() + cursor, materialized.begin() + cursor + count);
+        }
+        cursor += count;
+    }
+    materialized = std::move(compact);
+#if ANYPS5_ENABLE_SPIRV_TOOLS
+    materialized = ValidateAndOptimizeSpirv(materialized, target.vulkanVersion, target.spirvVersion, target.nonConstantImageOffsets, false);
+#endif
+    auto module = std::make_shared<SpecializedModule>();
+    std::map<std::uint32_t, std::uint32_t> bindingNumbers;
+    for (std::size_t cursor = 5; cursor < materialized.size();) {
+        const auto count = materialized[cursor] >> 16u;
+        const auto op = static_cast<spv::Op>(materialized[cursor] & 0xffffu);
+        if (op == spv::OpDecorate && count == 4u && materialized[cursor + 2u] == spv::DecorationBinding) bindingNumbers.emplace(materialized[cursor + 1u], materialized[cursor + 3u]);
+        if (op == spv::OpVariable && count >= 4u) {
+            if (const auto found = bindingNumbers.find(materialized[cursor + 2u]); found != bindingNumbers.end()) module->bindings.push_back(found->second);
+            module->pushData |= materialized[cursor + 3u] == spv::StorageClassPushConstant;
+        }
+        cursor += count;
+    }
+    module->spirv = std::move(materialized);
     std::lock_guard lock(mutex);
-    if (const auto found = modules.find(key); found != modules.end()) return found->second;
-    return modules.emplace(std::move(key), SpecializeVertexInputTypes(artifact, classes)).first->second;
+    return modules.emplace(id, std::move(module)).first->second;
 }
 
 RecompileResult materializeResult(const CompiledVariant& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot) {
@@ -445,8 +540,15 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
             result.specialization.push_back({first + 5u, kind});
         }
     }
-    result.spirv = specializeVertexInputs(variant.artifact, vertexClasses);
     result.specializationId = specializationId(result.variantId, result.specialization);
+    if (!result.specialization.empty() || !result.vertexInputPatches.empty()) {
+        const auto module = specializeModule(variant.artifact, vertexClasses, result.specialization, result.PipelineVariantId(), request.target);
+        result.spirv = module->spirv;
+        result.specialization.clear();
+        result.vertexInputPatches.clear();
+        std::erase_if(result.bindings, [&](const auto& binding) { return std::ranges::find(module->bindings, binding.binding) == module->bindings.end(); });
+        if (!result.pushConstants.empty() && !module->pushData) throw std::runtime_error("specialization removed the prepared push constant interface");
+    }
     return result;
 }
 

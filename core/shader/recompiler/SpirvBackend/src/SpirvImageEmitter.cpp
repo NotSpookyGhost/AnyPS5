@@ -48,7 +48,7 @@ struct SampleSetup {
 
 std::uint32_t RuntimeImageDword(SpirvEmitterState& state, std::uint32_t resource, std::uint32_t member) {
     const auto index = state.runtimeImageMetadata != 0u ? state.runtimeImageMetadata : ConstantU32(state, resource);
-    const auto dword = Binary(state, spv::OpIAdd, TypeU32(state), ConstantU32(state, offsetof(RuntimeAbi::ShaderData, images) / sizeof(std::uint32_t) + member), Binary(state, spv::OpIMul, TypeU32(state), index, ConstantU32(state, sizeof(RuntimeAbi::ResourceMetadata) / sizeof(std::uint32_t))));
+    const auto dword = Binary(state, spv::OpIAdd, TypeU32(state), ConstantU32(state, state.program.Metadata().bindings.ImageMetadataDword() + member), Binary(state, spv::OpIMul, TypeU32(state), index, ConstantU32(state, sizeof(RuntimeAbi::ResourceMetadata) / sizeof(std::uint32_t))));
     const auto pointer = state.module.AllocateId();
     state.module.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state), pointer, state.shaderDataStorageVariable, ConstantU32(state, 0u), dword);
     const auto value = state.module.AllocateId();
@@ -1409,7 +1409,24 @@ void EmitImage(SpirvValueEmitContext& ctx, const IrValue& inst) {
     std::vector<std::uint32_t> incoming;
     for (std::uint32_t index = 0u; index < modes.size(); ++index) {
         EmitLabel(state, labels[index]);
+        std::uint32_t modeMerge = 0u;
+        if (base.indirectRoot != ImageResource::NoIndirectImage) {
+            const auto enabled = state.module.SpecializationConstant(TypeU32(state), PipelineSpecialization::ImageModeBase + memory.resource * PipelineSpecialization::ImageModeStride + index, 1u);
+            const auto active = Binary(state, spv::OpINotEqual, TypeBool(state), enabled, ConstantU32(state, 0u));
+            const auto activeLabel = state.module.AllocateId();
+            const auto inactiveLabel = state.module.AllocateId();
+            modeMerge = state.module.AllocateId();
+            state.module.AddFunction(spv::OpSelectionMerge, modeMerge, spv::SelectionControlMaskNone);
+            state.module.AddFunction(spv::OpBranchConditional, active, activeLabel, inactiveLabel);
+            EmitLabel(state, inactiveLabel);
+            state.module.AddFunction(spv::OpUnreachable);
+            EmitLabel(state, activeLabel);
+        }
         emitMode(modes[index]);
+        if (modeMerge != 0u) {
+            state.module.AddFunction(spv::OpBranch, modeMerge);
+            EmitLabel(state, modeMerge);
+        }
         if (returnsValue) incoming.insert(incoming.end(), {ctx.Def(&inst), state.currentLabel});
         ctx.definitions.erase(&inst);
         state.module.AddFunction(spv::OpBranch, merge);

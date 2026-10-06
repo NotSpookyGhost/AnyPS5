@@ -54,6 +54,7 @@ void requireSameArtifact(const CompiledShaderArtifact& left, const CompiledShade
     require(left.bdaAbiVersion == right.bdaAbiVersion, prefix + "BDA ABI version differs");
     require(left.runtimeAbiVersion == right.runtimeAbiVersion, prefix + "runtime ABI version differs");
     require(left.memoryOffsetDword == right.memoryOffsetDword, prefix + "memory offset differs");
+    require(left.shaderDataDwords == right.shaderDataDwords && left.imageMetadataDword == right.imageMetadataDword && left.runtimeImageCount == right.runtimeImageCount && left.runtimeImageResources == right.runtimeImageResources, prefix + "compact data layout differs");
     require(left.hostSubgroupSize == right.hostSubgroupSize, prefix + "host subgroup size differs");
     require(left.vertexInputs == right.vertexInputs, prefix + "vertex inputs differ");
     require(left.vertexInputPatches == right.vertexInputPatches, prefix + "vertex type patches differ");
@@ -636,8 +637,8 @@ void verifyInvocationIsolation() {
         request.userData = descriptor;
         const auto changed = Recompile(request.request);
         require(changed.cacheHit && first.variantId == changed.variantId, "buffer metadata changed the compiled variant");
-        requireSameArtifact(first, changed, "runtime buffer artifact");
-        require(first.spirv.data() == changed.spirv.data(), "buffer metadata duplicated the SPIR-V");
+        const auto repeated = Recompile(request.request);
+        require(changed.spirv.data() == repeated.spirv.data() && changed.PipelineVariantId() == repeated.PipelineVariantId(), "buffer specialization did not reuse its module");
     }
     request.userData = original;
     request.userData[3] |= 0x40000000u;

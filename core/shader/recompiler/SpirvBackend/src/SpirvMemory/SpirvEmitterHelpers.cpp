@@ -1,5 +1,6 @@
 #include "Optimization/ResourceMaterializer.hpp"
 #include "BdaAbi.hpp"
+#include "PipelineSpecialization.hpp"
 #include "SpirvBackend/SpirvEmitterHelpers.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvTypes.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvConstants.hpp"
@@ -342,9 +343,9 @@ void DefineDescriptors(SpirvEmitterState& state) {
         };
         const auto ArrayType = [&](std::uint32_t type) {
             const bool heap = binding.kind == DescriptorBindingKind::Samplers || ImageBindingResourceClass(binding.kind) != ImageResourceClass::None;
-            const auto count = heap ? RuntimeAbi::HeapCapacity(binding.kind) : static_cast<std::uint32_t>(binding.resources.size());
-            if (binding.resources.size() > count) FailEmit("typed descriptor heap capacity exceeded");
-            return state.module.Type(spv::OpTypeArray, type, ConstantU32(state, count));
+            const auto count = static_cast<std::uint32_t>(binding.resources.size());
+            const auto length = heap ? state.module.SpecializationConstant(TypeU32(state), PipelineSpecialization::HeapCountBase + static_cast<std::uint32_t>(binding.kind), count) : ConstantU32(state, count);
+            return state.module.Type(spv::OpTypeArray, type, length);
         };
         switch (binding.kind) {
         case DescriptorBindingKind::Buffers:

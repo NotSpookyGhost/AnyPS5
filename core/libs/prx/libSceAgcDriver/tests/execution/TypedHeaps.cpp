@@ -30,13 +30,11 @@ ShaderRecompiler::RecompileResult Compile(AgcDriver::VulkanDevice& device, std::
     const auto instructions = store ? std::span<const std::uint32_t>(storeCode) : std::span<const std::uint32_t>(code);
     ShaderRecompiler::RecompileRequest request{{ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(instructions.data()), instructions, 0u, {}}, {32u, 0u, userData, compute, std::nullopt, std::nullopt, {}}, device.Target(), {0u, 0u, 0u, 128u}};
     auto result = ShaderRecompiler::Recompile(request);
-    Require(result.pushConstants.empty(), "ShaderData unexpectedly uses a variable push layout");
-    const auto dataBinding = std::ranges::find_if(result.bindings, [](const auto& binding) { return binding.role == ShaderRecompiler::DescriptorRole::ShaderData; });
-    Require(dataBinding != result.bindings.end() && dataBinding->guestDescriptor.size() == ShaderRecompiler::RuntimeAbi::ShaderDataDwords, "ShaderData does not match the fixed ABI");
-    ShaderRecompiler::RuntimeAbi::ShaderData data{};
-    std::memcpy(&data, dataBinding->guestDescriptor.data(), sizeof(data));
-    Require(data.version == ShaderRecompiler::RuntimeAbi::Version && data.imageCount == 1u, "resource metadata header is invalid");
-    Require(data.images[0].elementCount == 1u && data.images[0].firstElement == 0u && (data.images[0].flags & 1u) == (nullImage ? 1u : 0u), "image heap metadata is invalid");
+    Require(result.runtimeImageCount == 0u, "direct image allocated runtime image metadata");
+    Require(result.shaderDataDwords < ShaderRecompiler::RuntimeAbi::ShaderDataDwords, "shader data was not compacted");
+    for (const auto& binding : result.bindings) {
+        if (binding.role == ShaderRecompiler::DescriptorRole::GuestImages) Require(binding.count == 1u, "single image expanded into unused descriptor slots");
+    }
     return result;
 }
 

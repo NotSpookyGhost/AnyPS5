@@ -35,7 +35,7 @@ void Run(AgcDriver::VulkanDevice& device) {
         ShaderRecompiler::RecompileRequest request{{ShaderRecompiler::ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(code.data()), code, 0u, {}}, {32u, 0u, userData, compute, std::nullopt, std::nullopt, {}}, device.Target(), {0u, 0u, 0u, 128u}};
         const auto shader = ShaderRecompiler::Recompile(request);
         if (first.variantId == 0u) first = shader;
-        else Require(shader.cacheHit && shader.variantId == first.variantId && shader.spirv.data() == first.spirv.Words().data(), "T#/S# changed the compiled artifact");
+        else Require(shader.cacheHit && shader.variantId == first.variantId, "T#/S# changed the compiled artifact");
         device.Dispatch(shader, 1u, 1u, 1u);
         device.WaitIdle();
         const auto pixel = clamped ? 31u : 8u;

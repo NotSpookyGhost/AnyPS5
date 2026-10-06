@@ -22,7 +22,7 @@ bool UserDataDwordIndex(const SpirvEmitterState& state, ScalarReg reg, std::uint
     if (found == registers.end() || *found != registerIndex) {
         return false;
     }
-    dwordIndex = RuntimeAbi::UserDataDword + registerIndex;
+    dwordIndex = static_cast<std::uint32_t>(found - registers.begin());
     return true;
 }
 
@@ -1129,11 +1129,9 @@ void EmitSetAttribute(SpirvValueEmitContext& ctx, const IrValue& inst) {
         auto value = ExportVector(ctx, data, exp, uintOutput);
         if (state.program.Resources().stage == IrShaderStage::Pixel && exp.kind == ExportTargetKind::Mrt) {
             if (exp.index >= 8u) throw std::runtime_error("fragment export target exceeds the runtime mapping table");
-            const auto mapping = EmitShaderDataDwordLoad(state, RuntimeAbi::ExportMappingsDword + exp.index);
             std::array<std::uint32_t, 4> components{};
             for (std::uint32_t component = 0; component < components.size(); ++component) {
-                const auto shifted = Binary(state, spv::OpShiftRightLogical, TypeU32(state), mapping, ConstantU32(state, component * 2u));
-                const auto index = Binary(state, spv::OpBitwiseAnd, TypeU32(state), shifted, ConstantU32(state, 3u));
+                const auto index = state.module.SpecializationConstant(TypeU32(state), PipelineSpecialization::ExportBase + exp.index * 4u + component, component);
                 components[component] = state.module.AllocateId();
                 state.module.AddFunction(spv::OpVectorExtractDynamic, uintOutput ? TypeU32(state) : TypeF32(state), components[component], value, index);
             }

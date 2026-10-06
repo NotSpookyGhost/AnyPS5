@@ -3,6 +3,7 @@
 #include "SpirvBackend/SpirvMemory/SpirvConstants.hpp"
 #include "SpirvBackend/SpirvEmitterHelpers.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
+#include "PipelineSpecialization.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <stdexcept>
@@ -48,7 +49,9 @@ std::uint32_t DescriptorElementPointer(SpirvEmitterState& state, std::uint32_t r
         ExitDescriptorBindingFailure(state, kind, resource, variableName);
     }
     const auto pointer = state.module.AllocateId();
-    state.module.AddFunction(spv::OpAccessChain, resultPtrType, pointer, variableId, ConstantU32(state, arrayIndex));
+    const bool heap = kind == DescriptorBindingKind::Samplers || ImageBindingResourceClass(kind) != ImageResourceClass::None;
+    const auto index = heap ? state.module.SpecializationConstant(TypeU32(state), PipelineSpecialization::DescriptorIndex(static_cast<std::uint32_t>(kind), arrayIndex), arrayIndex) : ConstantU32(state, arrayIndex);
+    state.module.AddFunction(spv::OpAccessChain, resultPtrType, pointer, variableId, index);
     return pointer;
 }
 
@@ -63,7 +66,7 @@ std::uint32_t TableImageIndex(SpirvEmitterState& state, DescriptorBindingKind ki
     }
     state.module.EmitCapability(dynamic);
     if (state.runtimeImageMetadata == 0u) FailEmit("bindless image has no runtime metadata index");
-    const auto offset = Binary(state, spv::OpIAdd, TypeU32(state), ConstantU32(state, (offsetof(RuntimeAbi::ShaderData, images) + offsetof(RuntimeAbi::ResourceMetadata, firstElement)) / sizeof(std::uint32_t)), Binary(state, spv::OpIMul, TypeU32(state), state.runtimeImageMetadata, ConstantU32(state, sizeof(RuntimeAbi::ResourceMetadata) / sizeof(std::uint32_t))));
+    const auto offset = Binary(state, spv::OpIAdd, TypeU32(state), ConstantU32(state, state.program.Metadata().bindings.ImageMetadataDword() + offsetof(RuntimeAbi::ResourceMetadata, firstElement) / sizeof(std::uint32_t)), Binary(state, spv::OpIMul, TypeU32(state), state.runtimeImageMetadata, ConstantU32(state, sizeof(RuntimeAbi::ResourceMetadata) / sizeof(std::uint32_t))));
     const auto metadata = state.module.AllocateId();
     state.module.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state), metadata, state.shaderDataStorageVariable, ConstantU32(state, 0u), offset);
     const auto index = state.module.AllocateId();
@@ -249,7 +252,16 @@ void EmitStorageImageWrite(SpirvEmitterState& state, std::uint32_t resource, std
     state.module.AddFunction(std::span<const std::uint32_t>(words));
     for (std::uint32_t mip = 0; mip < image.mipCount; mip++) {
         EmitLabel(state, labels[mip]);
+        const auto count = state.module.SpecializationConstant(TypeU32(state), PipelineSpecialization::MipCountBase + resource, image.mipCount);
+        const auto active = Binary(state, spv::OpULessThan, TypeBool(state), ConstantU32(state, mip), count);
+        const auto writeLabel = state.module.AllocateId();
+        const auto nextLabel = state.module.AllocateId();
+        state.module.AddFunction(spv::OpSelectionMerge, nextLabel, spv::SelectionControlMaskNone);
+        state.module.AddFunction(spv::OpBranchConditional, active, writeLabel, nextLabel);
+        EmitLabel(state, writeLabel);
         state.module.AddFunction(spv::OpImageWrite, loadAt(arrayIndex + mip), coord, texel);
+        state.module.AddFunction(spv::OpBranch, nextLabel);
+        EmitLabel(state, nextLabel);
         state.module.AddFunction(spv::OpBranch, mergeLabel);
     }
     EmitLabel(state, mergeLabel);

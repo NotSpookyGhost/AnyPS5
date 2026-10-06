@@ -79,7 +79,7 @@ void Run(AgcDriver::VulkanDevice& device) {
         Require(vertex.vertexOffsetSgpr == -1 && vertex.instanceOffsetSgpr == -1, "runtime vertex fetch requested draw offset folding");
         Require(vertex.bdaAbiVersion != 0u, "runtime vertex fetch has no BDA ABI");
         if (first.spirv.empty()) first = vertex;
-        else Require(vertex.cacheHit && vertex.variantId == first.variantId && vertex.spirv.data() == first.spirv.Words().data(), "runtime vertex descriptor changed the artifact");
+        else Require(vertex.cacheHit && vertex.variantId == first.variantId, "runtime vertex descriptor changed the artifact");
         const auto pushBytes = static_cast<std::uint32_t>(vertex.pushConstants.size());
         ShaderRecompiler::ShaderPixelStageInfo pixelInfo{};
         pixelInfo.wave32 = true;

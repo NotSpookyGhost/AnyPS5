@@ -287,6 +287,10 @@ void encodeArtifact(Writer& writer, const CompiledShaderArtifact& result) {
     writer.Values(std::span<const std::uint32_t>(result.spirv.Words()));
     writer.Value(result.bdaAbiVersion);
     writer.Value(result.memoryOffsetDword);
+    writer.Value(result.shaderDataDwords);
+    writer.Value(result.imageMetadataDword);
+    writer.Value(result.runtimeImageCount);
+    writer.Values(std::span<const std::uint32_t>(result.runtimeImageResources));
     writer.List(result.vertexInputPatches, [](Writer& out, const VertexInputPatch& patch) {
         out.Value(patch.location);
         out.Value(patch.word);
@@ -322,6 +326,10 @@ void decodeArtifact(Reader& reader, CompiledShaderArtifact& result) {
     result.spirv = std::move(words);
     reader.Value(result.bdaAbiVersion);
     reader.Value(result.memoryOffsetDword);
+    reader.Value(result.shaderDataDwords);
+    reader.Value(result.imageMetadataDword);
+    reader.Value(result.runtimeImageCount);
+    reader.Values(result.runtimeImageResources);
     reader.List(result.vertexInputPatches, 20, [](Reader& in, VertexInputPatch& patch) {
         in.Value(patch.location);
         in.Value(patch.word);
@@ -393,6 +401,7 @@ void encodeLayout(Writer& writer, const IrBindingLayout& layout) {
     writer.Value(layout.memoryOffsetDword);
     writer.Value(layout.memoryOffsetCount);
     writer.Value(layout.dispatchThreadLimit);
+    writer.Value(layout.runtimeImageCount);
     writer.Values(std::span<const std::uint32_t>(layout.userDataRegisters));
     writer.List(layout.descriptors, [](Writer& out, const IrDescriptorBinding& descriptor) {
         out.Value(descriptor.kind);
@@ -405,8 +414,9 @@ void decodeLayout(Reader& reader, IrBindingLayout& layout) {
     reader.Value(layout.memoryOffsetDword);
     reader.Value(layout.memoryOffsetCount);
     reader.Value(layout.dispatchThreadLimit);
+    reader.Value(layout.runtimeImageCount);
     reader.Values(layout.userDataRegisters);
-    reader.List(layout.descriptors, 12, [](Reader& in, IrDescriptorBinding& descriptor) {
+    reader.List(layout.descriptors, static_cast<std::size_t>(RuntimeAbi::Binding::Count), [](Reader& in, IrDescriptorBinding& descriptor) {
         in.Value(descriptor.kind);
         in.Values(descriptor.resources);
     });

@@ -94,12 +94,14 @@ BindingAllocationResult BindingAllocator::Allocate(IrProgram& program, const Bin
 
     IrBindingLayout next;
     next.userDataRegisters = collectUserData(program);
-    next.memoryOffsetDword = RuntimeAbi::BufferOffsetsDword;
+    next.memoryOffsetDword = static_cast<std::uint32_t>(next.userDataRegisters.size());
     next.memoryOffsetCount = static_cast<std::uint32_t>(info.buffers.size());
     next.dispatchThreadLimit = info.dispatchThreadLimit;
     if (info.buffers.size() > RuntimeAbi::BufferCapacity || info.images.size() > RuntimeAbi::ImageCapacity || info.samplers.size() > RuntimeAbi::SamplerHeapCapacity) fail("shader binding layout exceeds runtime metadata capacity");
     if (std::ranges::any_of(next.userDataRegisters, [](auto reg) { return reg >= RuntimeAbi::UserDataCapacity; })) fail("shader user data exceeds runtime ABI capacity");
-    next.pushDataStartDword = PushData::NoStart;
+    if (std::ranges::any_of(info.images, [](const auto& image) { return image.indirectRoot != ImageResource::NoIndirectImage; })) next.runtimeImageCount = static_cast<std::uint32_t>(info.images.size());
+    const auto pushSize = layout.pushConstantSizeBytes / 4u;
+    next.pushDataStartDword = next.runtimeImageCount == 0u && next.ShaderDataDwords() != 0u && next.ShaderDataDwords() <= pushSize ? layout.pushConstantOffsetBytes / 4u : PushData::NoStart;
 
     if (!info.buffers.empty()) {
         std::vector<std::uint32_t> resources(info.buffers.size());

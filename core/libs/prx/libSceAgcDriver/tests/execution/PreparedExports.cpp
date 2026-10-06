@@ -1,3 +1,4 @@
+#include <spirv/unified1/spirv.hpp>
 #include "VulkanTestDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
@@ -75,16 +76,20 @@ void Run(AgcDriver::VulkanDevice& device, bool integer) {
         SrtRuntime runtime{};
         const auto capture = invocation.Capture(runtime);
         const auto pixel = invocation.Materialize(*capture);
-        Require(pixel->spirv.data() == artifact.spirv.data() && pixel->variantId == artifact.variantId, "export mapping replaced the prepared fragment artifact");
+        Require(pixel->variantId == artifact.variantId && pixel->specialization.empty(), "export mapping did not materialize a prepared fragment module");
         if (!first) first = pixel;
         else if (mapping == 0xe4u) Require(pixel == first, "export mapping did not reuse the materialized result");
         else Require(pixel != first, "export mapping reused stale materialized data");
         for (const bool cached : {true, false}) {
             request.useCache = cached;
             const auto materialized = MaterializeShader(request, *capture, *handle);
-            const auto binding = std::find_if(materialized->bindings.begin(), materialized->bindings.end(), [](const auto& entry) { return entry.role == DescriptorRole::ShaderData; });
-            Require(binding != materialized->bindings.end(), "fragment runtime data binding is missing");
-            for (unsigned slot = 0; slot < 8; ++slot) Require(binding->guestDescriptor.at(RuntimeAbi::ExportMappingsDword + slot) == request.context.pixel->targetExportMapping[slot], "runtime export mapping is stale");
+            Require(materialized->spirv.data() == pixel->spirv.data() && materialized->PipelineVariantId() == pixel->PipelineVariantId(), "export mapping did not reuse its specialized module");
+            for (std::size_t cursor = 5; cursor < materialized->spirv.size();) {
+                const auto count = materialized->spirv[cursor] >> 16u;
+                Require(count != 0u && count <= materialized->spirv.size() - cursor, "invalid specialized fragment instruction");
+                Require((materialized->spirv[cursor] & 0xffffu) != static_cast<std::uint32_t>(spv::OpVectorExtractDynamic), "fragment export retained a dynamic channel selection");
+                cursor += count;
+            }
         }
         request.useCache = true;
         if (integer) continue;

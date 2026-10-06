@@ -313,7 +313,7 @@ void CheckRuntimeDescriptors(AgcDriver::VulkanDevice& device) {
         Output.fill(0xdeadbeefu);
         const auto result = ShaderRecompiler::Recompile(request);
         if (first.spirv.empty()) first = result;
-        else Require(result.cacheHit && result.variantId == first.variantId && result.spirv.data() == first.spirv.Words().data(), "runtime V# changed the formatted shader artifact");
+        else Require(result.cacheHit && result.variantId == first.variantId, "runtime V# changed the formatted shader artifact");
         device.Dispatch(result, 1, 1, 1);
         device.WaitIdle();
         for (std::uint32_t lane = 0; lane < 32u; ++lane) {

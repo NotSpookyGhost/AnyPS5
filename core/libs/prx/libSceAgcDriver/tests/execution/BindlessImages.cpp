@@ -57,15 +57,13 @@ void Run(AgcDriver::VulkanDevice& device) {
         RecompileRequest request{{ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(code.data()), code, 0u, {}}, {32u, 0u, userData, compute, std::nullopt, std::nullopt, regions}, device.Target(), {0u, 0u, 0u, 128u}};
         const auto shader = Recompile(request);
         if (artifact.variantId == 0u) artifact = shader;
-        else Require(shader.cacheHit && shader.variantId == artifact.variantId && shader.spirv.data() == artifact.spirv.Words().data(), "bindless table changed the compiled artifact");
+        else Require(shader.cacheHit && shader.variantId == artifact.variantId, "bindless table changed the compiled artifact");
         if (iteration == 1u) {
             auto invalid = shader;
             auto binding = std::ranges::find_if(invalid.bindings, [](const DescriptorBinding& value) { return value.role == DescriptorRole::ShaderData; });
             Require(binding != invalid.bindings.end(), "bindless shader has no runtime metadata");
-            RuntimeAbi::ShaderData metadata{};
-            std::memcpy(&metadata, binding->guestDescriptor.data(), sizeof(metadata));
-            metadata.images[0].firstElement = RuntimeAbi::SampledHeapCapacity;
-            std::memcpy(binding->guestDescriptor.data(), &metadata, sizeof(metadata));
+            const auto offset = invalid.imageMetadataDword + invalid.runtimeImageResources.at(0) * (sizeof(RuntimeAbi::ResourceMetadata) / sizeof(std::uint32_t)) + offsetof(RuntimeAbi::ResourceMetadata, firstElement) / sizeof(std::uint32_t);
+            binding->guestDescriptor.at(offset) = RuntimeAbi::SampledHeapCapacity;
             bool rejected = false;
             try {
                 device.Dispatch(invalid, 1u, 1u, 1u);
