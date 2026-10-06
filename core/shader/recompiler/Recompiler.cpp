@@ -7,6 +7,7 @@
 #include "CacheKey.hpp"
 #include "CompiledVariant.hpp"
 #include "VertexInputSpecialization.hpp"
+#include "SpirvBackend/SpirvSpecialization.hpp"
 #include "RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include "ShaderDiskCache.hpp"
 #include <list>
@@ -448,10 +449,9 @@ std::shared_ptr<const SpecializedModule> specializeModule(const CompiledShaderAr
         }
         cursor += count;
     }
+    materialized = SpecializeSpirv(materialized);
 #if ANYPS5_ENABLE_SPIRV_TOOLS
     materialized = ValidateAndOptimizeSpirv(materialized, target.vulkanVersion, target.spirvVersion, target.nonConstantImageOffsets, true, true);
-#else
-    throw std::runtime_error("prepared shader materialization requires SPIRV-Tools");
 #endif
     std::map<std::uint32_t, std::uint32_t> descriptorVariables;
     std::set<std::uint32_t> usedDescriptors;

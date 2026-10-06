@@ -1,6 +1,7 @@
 #include "ShaderDiskCache.hpp"
 #include "CacheKey.hpp"
 #include "VertexInputSpecialization.hpp"
+#include "SpirvBackend/SpirvSpecialization.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
 #include "ShaderCacheDirectory.hpp"
 #include <algorithm>
@@ -715,6 +716,69 @@ void verifyVertexTypeSpecialization() {
     require(rejected, "out-of-range vertex type patch was accepted");
 }
 
+void verifyBuiltinSpecialization() {
+    std::vector<std::uint32_t> words{spv::MagicNumber, 0x00010300u, 0u, 40u, 0u};
+    const auto emit = [&](spv::Op op, std::initializer_list<std::uint32_t> operands) {
+        words.push_back((static_cast<std::uint32_t>(operands.size() + 1u) << 16u) | op);
+        words.insert(words.end(), operands);
+    };
+    emit(spv::OpCapability, {spv::CapabilityShader});
+    emit(spv::OpMemoryModel, {spv::AddressingModelLogical, spv::MemoryModelGLSL450});
+    emit(spv::OpEntryPoint, {spv::ExecutionModelGLCompute, 10u, 0x6e69616du, 0u});
+    emit(spv::OpExecutionMode, {10u, spv::ExecutionModeLocalSize, 1u, 1u, 1u});
+    emit(spv::OpTypeVoid, {1u});
+    emit(spv::OpTypeBool, {2u});
+    emit(spv::OpTypeInt, {3u, 32u, 0u});
+    emit(spv::OpTypeVector, {4u, 3u, 4u});
+    emit(spv::OpTypeFunction, {5u, 1u});
+    emit(spv::OpConstant, {3u, 6u, 0u});
+    emit(spv::OpConstant, {3u, 7u, 1u});
+    emit(spv::OpConstant, {3u, 8u, 2u});
+    emit(spv::OpConstant, {3u, 9u, 3u});
+    emit(spv::OpConstantComposite, {4u, 30u, 6u, 7u, 8u, 9u});
+    emit(spv::OpFunction, {1u, 10u, spv::FunctionControlMaskNone, 5u});
+    emit(spv::OpLabel, {11u});
+    emit(spv::OpBitFieldUExtract, {3u, 12u, 9u, 7u, 7u});
+    emit(spv::OpSelectionMerge, {16u, spv::SelectionControlMaskNone});
+    emit(spv::OpSwitch, {12u, 15u, 1u, 14u});
+    emit(spv::OpLabel, {14u});
+    emit(spv::OpBranch, {16u});
+    emit(spv::OpLabel, {15u});
+    emit(spv::OpIAdd, {3u, 17u, 8u, 9u});
+    emit(spv::OpBranch, {16u});
+    emit(spv::OpLabel, {16u});
+    emit(spv::OpPhi, {3u, 18u, 7u, 14u, 17u, 15u});
+    emit(spv::OpIEqual, {2u, 19u, 18u, 7u});
+    emit(spv::OpSelectionMerge, {22u, spv::SelectionControlMaskNone});
+    emit(spv::OpBranchConditional, {19u, 20u, 21u});
+    emit(spv::OpLabel, {20u});
+    emit(spv::OpVectorExtractDynamic, {3u, 23u, 30u, 6u});
+    emit(spv::OpVectorExtractDynamic, {3u, 24u, 30u, 7u});
+    emit(spv::OpVectorExtractDynamic, {3u, 25u, 30u, 8u});
+    emit(spv::OpVectorExtractDynamic, {3u, 26u, 30u, 9u});
+    emit(spv::OpCompositeConstruct, {4u, 27u, 23u, 24u, 25u, 26u});
+    emit(spv::OpBranch, {22u});
+    emit(spv::OpLabel, {21u});
+    emit(spv::OpUnreachable, {});
+    emit(spv::OpLabel, {22u});
+    emit(spv::OpReturn, {});
+    emit(spv::OpFunctionEnd, {});
+    const auto specialized = SpecializeSpirv(words);
+    bool identity = false;
+    bool correctPhi = false;
+    for (std::size_t cursor = 5; cursor < specialized.size();) {
+        const auto count = specialized[cursor] >> 16u;
+        require(count != 0u && count <= specialized.size() - cursor, "builtin specialization produced a truncated instruction");
+        const auto op = static_cast<spv::Op>(specialized[cursor] & 0xffffu);
+        require(op != spv::OpSwitch && op != spv::OpBranchConditional && op != spv::OpPhi && op != spv::OpVectorExtractDynamic, "builtin specialization retained constant control flow or dynamic exports");
+        if (op == spv::OpCopyObject && specialized[cursor + 2u] == 27u) identity = specialized[cursor + 3u] == 30u;
+        if (op == spv::OpConstant && specialized[cursor + 2u] == 18u) correctPhi = specialized[cursor + 3u] == 1u;
+        cursor += count;
+    }
+    require(identity && correctPhi, "builtin specialization selected the wrong export or phi value");
+    require(SpecializeSpirv(specialized) == specialized, "builtin specialization is not stable");
+}
+
 void verifyDefaultDirectory(const char* self) {
     setEnvironment("ANYPS5_SHADER_CACHE_DIR", "");
     setEnvironment("ANYPS5_NO_SHADER_CACHE", "1");
@@ -747,6 +811,7 @@ int main(int argc, char** argv) {
         verifyFailureMemoSwitch(argv[0]);
         verifyInvocationIsolation();
         verifyVertexTypeSpecialization();
+        verifyBuiltinSpecialization();
         std::error_code error;
         std::filesystem::remove_all(directory, error);
         std::cout << "shader disk cache tests passed\n";
