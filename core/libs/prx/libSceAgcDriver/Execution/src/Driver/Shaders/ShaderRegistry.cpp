@@ -320,6 +320,11 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
         const auto duplicate = std::ranges::any_of(entries, [&](const auto& existing) { return existing.codeOffset == stage.entry.codeOffset && existing.handle->artifact == stage.entry.handle->artifact; });
         if (!duplicate) entries.push_back(std::move(stage.entry));
     }
+    const auto primitiveType = state.userConfig.find(0x242u);
+    for (const auto& stage : prepared) {
+        if (stage.snapshot->type == 1) continue;
+        ResolvePreparedGraphics(*stage.snapshot, {}, primitiveType == state.userConfig.end() ? 0u : primitiveType->second, localDevice->Target());
+    }
 }
 
 void Driver::ResolveShaderAbi(const Shader* shader, std::span<const ShaderRegister> context, std::span<const ShaderRegister> primitive) {
@@ -369,34 +374,65 @@ std::uint64_t NullPixelProgramAddress() {
 
 void Driver::ResolveGraphicsAbi(const Shader* vertex, const Shader* pixel, std::uint32_t primitiveType) {
     CheckFailure();
-    if (primitiveType != 7 && primitiveType != 17) return;
+    if (primitiveType != 0 && primitiveType != 7 && primitiveType != 17) return;
     require(vertex != nullptr && pixel != nullptr, "rectangle ABI requires vertex and fragment shaders");
     std::shared_ptr<const ShaderSnapshot> front;
     std::shared_ptr<const ShaderSnapshot> fragment;
     {
         std::lock_guard lock(mutex);
-        front = shaders->at(reinterpret_cast<std::uintptr_t>(const_cast<const void*>(vertex->code)));
-        fragment = shaders->at(reinterpret_cast<std::uintptr_t>(const_cast<const void*>(pixel->code)));
+        GuestMemory::CheckRange(vertex, sizeof(Shader), alignof(Shader));
+        GuestMemory::CheckRange(pixel, sizeof(Shader), alignof(Shader));
+        const auto lookup = [&](const Shader* shader) {
+            const auto address = reinterpret_cast<std::uintptr_t>(const_cast<const void*>(shader->code));
+            require(shaders != nullptr && shaders->contains(address), "rectangle ABI refers to an unregistered shader");
+            const auto snapshot = shaders->at(address);
+            require(snapshot->headerAddress == reinterpret_cast<std::uintptr_t>(shader), "rectangle ABI refers to a replaced shader header");
+            return snapshot;
+        };
+        front = lookup(vertex);
+        fragment = lookup(pixel);
     }
     require(front != fragment, "rectangle stages refer to the same shader");
     const auto localDevice = device.Load();
     require(localDevice != nullptr, "shader registration device is missing");
-    std::scoped_lock lock(front->prepared->mutex, fragment->prepared->mutex);
-    std::vector<PreparedShaders::Rectangle> rectangles;
-    for (const auto& vertexEntry : front->prepared->entries) {
-        for (const auto& fragmentEntry : fragment->prepared->entries) {
-            const auto& vertexArtifact = ShaderRecompiler::GetPreparedArtifact(*vertexEntry.handle);
-            const auto& fragmentArtifact = ShaderRecompiler::GetPreparedArtifact(*fragmentEntry.handle);
-            ShaderRecompiler::RecompileResult vertexResult;
-            ShaderRecompiler::RecompileResult fragmentResult;
-            static_cast<ShaderRecompiler::CompiledShaderArtifact&>(vertexResult) = vertexArtifact;
-            static_cast<ShaderRecompiler::CompiledShaderArtifact&>(fragmentResult) = fragmentArtifact;
-            rectangles.push_back({vertexArtifact.variantId, fragmentArtifact.variantId, ShaderRecompiler::BuildRectListShaders(vertexResult, fragmentResult, localDevice->Target())});
+    ResolvePreparedGraphics(*front, fragment, primitiveType, localDevice->Target());
+}
+
+void ResolvePreparedGraphics(const ShaderSnapshot& front, const std::shared_ptr<const ShaderSnapshot>& fragment, std::uint32_t primitiveType, const ShaderRecompiler::SpirvTarget& target) {
+    require(fragment.get() != &front, "rectangle stages refer to the same shader");
+    std::vector<std::shared_ptr<const ShaderSnapshot>> fragments;
+    {
+        std::lock_guard lock(front.prepared->mutex);
+        auto& prepared = *front.prepared;
+        std::erase_if(prepared.fragments, [](const auto& entry) { return entry.expired(); });
+        if (fragment && !std::ranges::any_of(prepared.fragments, [&](const auto& entry) { return entry.lock() == fragment; })) prepared.fragments.push_back(fragment);
+        prepared.rectangleRequested |= primitiveType == 7 || primitiveType == 17;
+        if (!prepared.rectangleRequested) return;
+        for (const auto& entry : prepared.fragments) {
+            if (auto snapshot = entry.lock()) fragments.push_back(std::move(snapshot));
         }
     }
-    require(!rectangles.empty(), "rectangle ABI has missing stage artifacts");
-    front->prepared->rectangles.insert(front->prepared->rectangles.end(), std::make_move_iterator(rectangles.begin()), std::make_move_iterator(rectangles.end()));
+    for (const auto& pixel : fragments) {
+        std::scoped_lock lock(front.prepared->mutex, pixel->prepared->mutex);
+        require(!front.prepared->entries.empty() && !pixel->prepared->entries.empty(), "rectangle ABI has missing stage artifacts");
+        std::vector<PreparedShaders::Rectangle> rectangles;
+        for (const auto& vertexEntry : front.prepared->entries) {
+            for (const auto& fragmentEntry : pixel->prepared->entries) {
+                const auto& vertexArtifact = ShaderRecompiler::GetPreparedArtifact(*vertexEntry.handle);
+                const auto& fragmentArtifact = ShaderRecompiler::GetPreparedArtifact(*fragmentEntry.handle);
+                const auto exists = [&](const auto& entry) { return entry.vertexId == vertexArtifact.variantId && entry.fragmentId == fragmentArtifact.variantId; };
+                if (std::ranges::any_of(front.prepared->rectangles, exists) || std::ranges::any_of(rectangles, exists)) continue;
+                ShaderRecompiler::RecompileResult vertexResult;
+                ShaderRecompiler::RecompileResult fragmentResult;
+                static_cast<ShaderRecompiler::CompiledShaderArtifact&>(vertexResult) = vertexArtifact;
+                static_cast<ShaderRecompiler::CompiledShaderArtifact&>(fragmentResult) = fragmentArtifact;
+                rectangles.push_back({vertexArtifact.variantId, fragmentArtifact.variantId, ShaderRecompiler::BuildRectListShaders(vertexResult, fragmentResult, target)});
+            }
+        }
+        front.prepared->rectangles.insert(front.prepared->rectangles.end(), std::make_move_iterator(rectangles.begin()), std::make_move_iterator(rectangles.end()));
+    }
 }
+
 void Driver::RegisterShader(const Shader* shader) {
     CheckFailure();
     GuestMemory::CheckRange(shader, sizeof(Shader), 1);

@@ -14,6 +14,8 @@
 
 namespace AgcDriver::DriverDetail {
 
+struct ShaderSnapshot;
+
 struct PreparedShaders {
     struct Entry {
         std::size_t codeOffset;
@@ -27,6 +29,8 @@ struct PreparedShaders {
     std::mutex mutex;
     std::vector<Entry> entries;
     std::vector<Rectangle> rectangles;
+    std::vector<std::weak_ptr<const ShaderSnapshot>> fragments;
+    bool rectangleRequested = false;
 };
 struct ShaderSnapshot {
     std::uint64_t codeAddress;
@@ -42,6 +46,8 @@ using ShaderRegistry = std::map<std::uint64_t, std::shared_ptr<const ShaderSnaps
 std::shared_ptr<const ShaderSnapshot> ReadRawComputeShader(std::uint64_t address);
 
 std::uint64_t NullPixelProgramAddress();
+void ResolvePreparedGraphics(const ShaderSnapshot& front, const std::shared_ptr<const ShaderSnapshot>& fragment, std::uint32_t primitiveType, const ShaderRecompiler::SpirvTarget& target);
+
 ShaderRecompiler::RectListShaders PreparedRectangle(const ShaderSnapshot& snapshot, std::uint64_t vertexId, std::uint64_t fragmentId);
 
 std::shared_ptr<const ShaderRecompiler::SourceHandle> SourceHandleFor(const ShaderSnapshot& snapshot, std::size_t codeOffset, const ShaderRecompiler::RecompileRequest& request);

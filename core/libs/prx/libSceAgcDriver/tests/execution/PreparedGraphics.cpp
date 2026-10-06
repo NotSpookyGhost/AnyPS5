@@ -128,6 +128,44 @@ void Check(AgcDriver::VulkanDevice& device, AgcDriver::Graphics::ShaderPath path
     for (const auto& stage : stages) stage.snapshot->prepared->entries.push_back(stage.entry);
     const auto& pixelArtifact = GetPreparedArtifact(*stages.back().entry.handle);
     Require(!pixelArtifact.fragmentParameters.empty() && pixelArtifact.fragmentParameters.front().sourceLocation == 3u, "prepared fragment lost interpolant mapping");
+    if (!mesh && !tessellation) {
+        for (const bool primitiveFirst : {false, true}) {
+            front.snapshot->prepared->rectangles.clear();
+            front.snapshot->prepared->fragments.clear();
+            front.snapshot->prepared->rectangleRequested = false;
+            if (primitiveFirst) ResolvePreparedGraphics(*front.snapshot, {}, 7, target);
+            ResolvePreparedGraphics(*front.snapshot, fragment.snapshot, 0, target);
+            if (!primitiveFirst) ResolvePreparedGraphics(*front.snapshot, {}, 17, target);
+            const auto vertexId = GetPreparedArtifact(*stages.front().entry.handle).variantId;
+            const auto rectangle = PreparedRectangle(*front.snapshot, vertexId, pixelArtifact.variantId);
+            Require(!rectangle.control.spirv.empty() && !rectangle.evaluation.spirv.empty(), "separate helpers did not prepare rectangle shaders");
+            const auto count = front.snapshot->prepared->rectangles.size();
+            ResolvePreparedGraphics(*front.snapshot, fragment.snapshot, 7, target);
+            Require(front.snapshot->prepared->rectangles.size() == count, "repeated helpers duplicated rectangle shaders");
+        }
+        auto changed = prepared;
+        changed.state.stages.vertexWaveSize = 64;
+        changed.pixel.interpolatorSettings[0] = 0x404u;
+        const auto newStages = PrepareGraphicsStages(changed, target);
+        front.snapshot->prepared->entries.push_back(newStages.front().entry);
+        ResolvePreparedGraphics(*front.snapshot, {}, 7, target);
+        const auto newVertexId = GetPreparedArtifact(*newStages.front().entry.handle).variantId;
+        Require(newVertexId != GetPreparedArtifact(*stages.front().entry.handle).variantId, "rectangle test did not change the vertex variant");
+        static_cast<void>(PreparedRectangle(*front.snapshot, newVertexId, pixelArtifact.variantId));
+        fragment.snapshot->prepared->entries.push_back(newStages.back().entry);
+        ResolvePreparedGraphics(*front.snapshot, fragment.snapshot, 0, target);
+        const auto newPixelId = GetPreparedArtifact(*newStages.back().entry.handle).variantId;
+        Require(newPixelId != pixelArtifact.variantId, "rectangle test did not change the fragment variant");
+        static_cast<void>(PreparedRectangle(*front.snapshot, newVertexId, newPixelId));
+        auto temporary = std::make_shared<ShaderSnapshot>();
+        temporary->prepared->entries = fragment.snapshot->prepared->entries;
+        ResolvePreparedGraphics(*front.snapshot, temporary, 0, target);
+        std::weak_ptr<const ShaderSnapshot> expired = temporary;
+        temporary.reset();
+        Require(expired.expired(), "helper link retained a shader snapshot");
+        ResolvePreparedGraphics(*front.snapshot, {}, 7, target);
+        Require(front.snapshot->prepared->fragments.size() == 1, "expired helper link was not removed");
+    }
     if (!dump.empty()) {
         for (std::size_t index = 0; index < stages.size(); ++index) {
             const auto& words = GetPreparedArtifact(*stages[index].entry.handle).spirv;
