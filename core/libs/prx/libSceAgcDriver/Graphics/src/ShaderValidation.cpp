@@ -1,5 +1,6 @@
 #include "BdaAbi.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineSpecialization.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
@@ -132,6 +133,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
     using Stage = ShaderRecompiler::ShaderStage;
     Require(compiled.program != nullptr, "missing compiled shader");
     const auto& shader = *compiled.program;
+    PipelineSpecialization::Validate(shader);
     const auto stage = compiled.stage;
     const bool vertex = stage == Stage::Vertex || stage == Stage::Local;
     const bool fragment = stage == Stage::Fragment;
@@ -269,7 +271,6 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
             case spv::OpDecorationGroup:
             case spv::OpGroupDecorate:
             case spv::OpGroupMemberDecorate:
-            case spv::OpSpecConstant:
             case spv::OpSpecConstantTrue:
             case spv::OpSpecConstantFalse:
             case spv::OpSpecConstantComposite:
@@ -346,6 +347,8 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                 break;
             case spv::OpConstant:
                 if (count == 4) module.constants.emplace(instruction[2], instruction[3]);
+                break;
+            case spv::OpSpecConstant:
                 break;
             default: break;
         }

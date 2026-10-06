@@ -340,6 +340,10 @@ void decodeArtifact(Reader& reader, CompiledShaderArtifact& result) {
 }
 
 void encodeInvocation(Writer& writer, const ShaderInvocation& invocation) {
+    writer.List(invocation.specialization, [](Writer& out, const PipelineSpecializationConstant& constant) {
+        out.Value(constant.id);
+        out.Value(constant.value);
+    });
     writer.List(invocation.bindings, encodeBinding);
     writer.Value<std::uint64_t>(invocation.pushConstants.size());
     for (const auto byte : invocation.pushConstants) writer.Value(static_cast<std::uint8_t>(byte));
@@ -352,6 +356,11 @@ void encodeInvocation(Writer& writer, const ShaderInvocation& invocation) {
 }
 
 void decodeInvocation(Reader& reader, ShaderInvocation& invocation) {
+    invocation.specializationId = 0;
+    reader.List(invocation.specialization, 8, [](Reader& in, PipelineSpecializationConstant& constant) {
+        in.Value(constant.id);
+        in.Value(constant.value);
+    });
     reader.List(invocation.bindings, 8, decodeBinding);
     std::vector<std::uint8_t> pushConstants;
     reader.Values(pushConstants);
