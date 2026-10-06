@@ -1,10 +1,13 @@
 #include "prx/libSceAgc/Shader/include/InterpolantMapping.hpp"
 
 #include <cstdio>
+#include <array>
+#include <algorithm>
 #include <stdexcept>
 #include <prx/libc/include/General.hpp>
 
 #include "SceShaders.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ShaderPreparation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderUtils.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderConstants.hpp"
@@ -54,13 +57,22 @@ int CreateInterpolantMapping(const char* fn, ShaderRegister* regs, const Shader*
     if (regs == nullptr) {
         throw std::runtime_error(std::string(fn) + ": regs is null");
     }
+    if (ps != nullptr && ps->num_input_semantics > 32) {
+        throw std::runtime_error(std::string(fn) + ": input semantic count exceeds 32");
+    }
 
+    AgcDriver::DriverDetail::ShaderPreparationTransaction transaction;
+    std::array<ShaderRegister, 32> values{};
+    auto* output = regs;
+    regs = values.data();
     if (ps == nullptr || ps->num_input_semantics == 0) {
         FillIdentityInterpolants(regs, 0);
         if (ps != nullptr) {
             AgcDriverResolveShaderAbi_nid_postfix(ps, {regs, 32}, {});
             if (gs != nullptr) AgcDriverResolveGraphicsAbi_nid_postfix(gs, ps, 0);
         }
+        transaction.Commit();
+        std::copy(values.begin(), values.end(), output);
         return 0;
     }
 
@@ -89,6 +101,8 @@ int CreateInterpolantMapping(const char* fn, ShaderRegister* regs, const Shader*
     FillIdentityInterpolants(regs, ps->num_input_semantics);
     AgcDriverResolveShaderAbi_nid_postfix(ps, {regs, 32}, {});
     AgcDriverResolveGraphicsAbi_nid_postfix(gs, ps, 0);
+    transaction.Commit();
+    std::copy(values.begin(), values.end(), output);
     return 0;
 }
 

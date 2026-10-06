@@ -11,6 +11,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+#include <future>
+#include <barrier>
 
 namespace {
 
@@ -178,6 +180,18 @@ void Registration(bool indirect) {
     header.registers = {{{0x20c, static_cast<std::uint32_t>(address >> 8u)}, {0x20d, static_cast<std::uint32_t>(address >> 40u)}, {0x207, 2}, {0x208, 1}, {0x209, 1}, {0x212, 0}, {0x213, 0}, {0x207, 1}, {0x207, 1}}};
     const auto threadRegisterIndex = header.registers.size() - 1;
     AgcDriverRegisterShader_nid_postfix(&header.shader);
+    std::barrier start(4);
+    std::vector<std::future<void>> registrations;
+    for (unsigned worker = 0; worker < 4; ++worker) {
+        registrations.push_back(std::async(std::launch::async, [&] {
+            start.arrive_and_wait();
+            for (unsigned iteration = 0; iteration < 8; ++iteration) {
+                AgcDriverRegisterShader_nid_postfix(&header.shader);
+                AgcDriverResolveShaderAbi_nid_postfix(&header.shader, {}, {});
+            }
+        }));
+    }
+    for (auto& registration : registrations) registration.get();
     header.registers[1].value |= 0x100u;
     ExpectFailure([&] { AgcDriverRegisterShader_nid_postfix(&header.shader); }, "invalid registered program address");
     header.registers[1].value &= 0xffu;

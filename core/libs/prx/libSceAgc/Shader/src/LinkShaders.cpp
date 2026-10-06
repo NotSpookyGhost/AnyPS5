@@ -1,4 +1,5 @@
 #include "SceShaders.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ShaderPreparation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderConstants.hpp"
@@ -21,11 +22,13 @@ extern "C" int APS5_VABI sceAgcLinkShaders(ShaderRegister* context, ShaderRegist
 
     // The simple vertex/pixel pipeline combines two primitive context registers
     // and 32 interpolant registers. Publish only after both helpers succeed.
+    AgcDriver::DriverDetail::ShaderPreparationTransaction transaction;
     std::array<ShaderRegister, 34> contextValues{};
     std::array<ShaderRegister, 3> primitiveValues{};
     sceAgcCreatePrimState(contextValues.data(), primitiveValues.data(), nullptr, vertex, primitiveType);
     sceAgcCreateInterpolantMapping(contextValues.data() + 2, vertex, pixel);
     AgcDriverResolveGraphicsAbi_nid_postfix(vertex, pixel, primitiveType);
+    transaction.Commit();
     std::copy(contextValues.begin(), contextValues.end(), context);
     std::copy(primitiveValues.begin(), primitiveValues.end(), primitive);
     return 0;

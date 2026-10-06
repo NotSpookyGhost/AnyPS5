@@ -1,4 +1,5 @@
 #include "VulkanTestDevice.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ShaderPreparation.hpp"
 #include "SceShaders.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
@@ -129,6 +130,18 @@ void Check(AgcDriver::VulkanDevice& device, AgcDriver::Graphics::ShaderPath path
     const auto& pixelArtifact = GetPreparedArtifact(*stages.back().entry.handle);
     Require(!pixelArtifact.fragmentParameters.empty() && pixelArtifact.fragmentParameters.front().sourceLocation == 3u, "prepared fragment lost interpolant mapping");
     if (!mesh && !tessellation) {
+        const auto frontCount = front.snapshot->prepared->entries.size();
+        const auto pixelCount = fragment.snapshot->prepared->entries.size();
+        Reject([&] {
+            ShaderPreparationTransaction transaction;
+            transaction.Edit(*front.snapshot).entries.push_back(stages.front().entry);
+            transaction.Edit(*fragment.snapshot).entries.push_back(stages.back().entry);
+            auto unsupported = target;
+            unsupported.tessellation.reset();
+            ResolvePreparedGraphics(*front.snapshot, fragment.snapshot, 7, unsupported);
+            transaction.Commit();
+        }, "tessellation shaders are unavailable");
+        Require(front.snapshot->prepared->entries.size() == frontCount && fragment.snapshot->prepared->entries.size() == pixelCount && front.snapshot->prepared->rectangles.empty() && front.snapshot->prepared->fragments.empty() && !front.snapshot->prepared->rectangleRequested, "failed rectangle compilation published part of the stage group");
         for (const bool primitiveFirst : {false, true}) {
             front.snapshot->prepared->rectangles.clear();
             front.snapshot->prepared->fragments.clear();

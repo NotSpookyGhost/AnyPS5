@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <iostream>
 
+extern "C" int APS5_VABI sceAgcLinkShaders(ShaderRegister*, ShaderRegister*, const void*, const Shader*, const Shader*, std::uint32_t);
 extern "C" int APS5_VABI sceAgcCreatePrimState(ShaderRegister*, ShaderRegister*, const Shader*, const Shader*, std::uint32_t);
 extern "C" int APS5_VABI sceAgcCreateInterpolantMapping(ShaderRegister*, const Shader*, const Shader*);
 
@@ -19,6 +20,7 @@ std::size_t stageCount = 0;
 unsigned preparations = 0;
 unsigned mappings = 0;
 unsigned links = 0;
+bool rejectLink = false;
 const Shader* mappedPixel = nullptr;
 
 void Require(bool condition) {
@@ -41,7 +43,8 @@ extern "C" void AgcDriverResolveShaderAbi_nid_postfix(const Shader* shader, std:
 }
 
 extern "C" void AgcDriverResolveGraphicsAbi_nid_postfix(const Shader* vertex, const Shader* pixel, std::uint32_t primitiveType) {
-    Require(vertex != nullptr && pixel == mappedPixel && primitiveType == 0);
+    if (rejectLink) throw std::runtime_error("injected link failure");
+    Require(vertex != nullptr && pixel == mappedPixel && (primitiveType == 0 || primitiveType == 7));
     ++links;
 }
 
@@ -88,6 +91,32 @@ int main() {
                 }
             }
         }
+        std::array<ShaderRegister, 34> linkedContext{};
+        std::array<ShaderRegister, 3> linkedPrimitive{};
+        for (auto& value : linkedContext) value.value = 0xdeadbeef;
+        for (auto& value : linkedPrimitive) value.value = 0xdeadbeef;
+        for (auto& value : interpolants) value.value = 0xdeadbeef;
+        rejectLink = true;
+        bool rejected = false;
+        try { sceAgcLinkShaders(linkedContext.data(), linkedPrimitive.data(), nullptr, &vertex, &pixel, 7); }
+        catch (const std::runtime_error&) { rejected = true; }
+        Require(rejected);
+        for (const auto value : linkedContext) Require(value.value == 0xdeadbeef);
+        for (const auto value : linkedPrimitive) Require(value.value == 0xdeadbeef);
+        rejected = false;
+        try { sceAgcCreateInterpolantMapping(interpolants.data(), &vertex, &pixel); }
+        catch (const std::runtime_error&) { rejected = true; }
+        Require(rejected);
+        for (const auto value : interpolants) Require(value.value == 0xdeadbeef);
+        rejectLink = false;
+        pixel.num_input_semantics = 33;
+        rejected = false;
+        try { sceAgcCreateInterpolantMapping(interpolants.data(), &vertex, &pixel); }
+        catch (const std::runtime_error&) { rejected = true; }
+        Require(rejected);
+        for (const auto value : interpolants) Require(value.value == 0xdeadbeef);
+        pixel.num_input_semantics = 1;
+        Require(sceAgcLinkShaders(linkedContext.data(), linkedPrimitive.data(), nullptr, &vertex, &pixel, 7) == 0);
         preparations = mappings = links = 0;
         Require(sceAgcCreatePrimState(nullptr, nullptr, nullptr, nullptr, 7) == 0);
         Require(sceAgcCreateInterpolantMapping(interpolants.data(), &vertex, nullptr) == 0);

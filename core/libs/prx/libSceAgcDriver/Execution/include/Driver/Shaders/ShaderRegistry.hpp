@@ -16,7 +16,7 @@ namespace AgcDriver::DriverDetail {
 
 struct ShaderSnapshot;
 
-struct PreparedShaders {
+struct PreparedShaderState {
     struct Entry {
         std::size_t codeOffset;
         std::shared_ptr<const ShaderRecompiler::SourceHandle> handle;
@@ -26,19 +26,22 @@ struct PreparedShaders {
         std::uint64_t fragmentId;
         ShaderRecompiler::RectListShaders shaders;
     };
-    std::mutex mutex;
     std::vector<Entry> entries;
     std::vector<Rectangle> rectangles;
     std::vector<std::weak_ptr<const ShaderSnapshot>> fragments;
     bool rectangleRequested = false;
 };
+struct PreparedShaders : PreparedShaderState {
+    std::mutex mutex;
+};
+
 struct ShaderSnapshot {
     std::uint64_t codeAddress;
     std::uint64_t headerAddress;
     std::uint8_t type;
     std::vector<std::uint32_t> code;
     std::vector<std::byte> header;
-    std::unique_ptr<PreparedShaders> prepared = std::make_unique<PreparedShaders>();
+    std::shared_ptr<PreparedShaders> prepared = std::make_shared<PreparedShaders>();
 };
 
 using ShaderRegistry = std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>>;
@@ -46,6 +49,8 @@ using ShaderRegistry = std::map<std::uint64_t, std::shared_ptr<const ShaderSnaps
 std::shared_ptr<const ShaderSnapshot> ReadRawComputeShader(std::uint64_t address);
 
 std::uint64_t NullPixelProgramAddress();
+void PublishRegisteredShader(std::shared_ptr<ShaderRegistry>& registry, const std::shared_ptr<const ShaderSnapshot>& snapshot);
+
 void ResolvePreparedGraphics(const ShaderSnapshot& front, const std::shared_ptr<const ShaderSnapshot>& fragment, std::uint32_t primitiveType, const ShaderRecompiler::SpirvTarget& target);
 
 ShaderRecompiler::RectListShaders PreparedRectangle(const ShaderSnapshot& snapshot, std::uint64_t vertexId, std::uint64_t fragmentId);
