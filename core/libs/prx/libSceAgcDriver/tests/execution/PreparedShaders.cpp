@@ -34,16 +34,15 @@ void Run(AgcDriver::VulkanDevice& device) {
     const ShaderRecompiler::ShaderComputeStageInfo compute{{1, 1, 1}, 0, {false, false, false}, false, 1, {}};
     ShaderRecompiler::RecompileRequest request{{ShaderRecompiler::ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}}, {32, 0, users, compute, {}, {}, {}}, device.ComputeTarget(32), {0, 0, 0, 128}};
     AgcDriver::DriverDetail::ShaderSnapshot snapshot{request.shader.codeAddress, 0, 0, {code.begin(), code.end()}, {}};
-    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, device.Serial(), request)); }, "artifact is missing");
+    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, request)); }, "artifact is missing");
     const auto handle = ShaderRecompiler::PrepareShader(request);
-    snapshot.prepared->entries.push_back({0, device.Serial(), handle});
-    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 1, device.Serial(), request)); }, "artifact is missing");
-    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, device.Serial() + 1, request)); }, "artifact is missing");
+    snapshot.prepared->entries.push_back({0, handle});
+    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 1, request)); }, "artifact is missing");
     const auto& artifact = ShaderRecompiler::GetPreparedArtifact(*handle);
     for (std::uint32_t value = 0; value < 8; ++value) {
         users.fill(value);
         request.useCache = value % 2 == 0;
-        const auto ready = AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, device.Serial(), request);
+        const auto ready = AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, request);
         ShaderRecompiler::SrtRuntime runtime{};
         runtime.userData = users;
         const auto capture = ShaderRecompiler::CaptureResources(request, runtime, *ready);
@@ -55,12 +54,11 @@ void Run(AgcDriver::VulkanDevice& device) {
     auto registeredRequest = request;
     registeredRequest.shader.code = snapshot.code;
     registeredRequest.useCache = true;
-    const auto invocation = AgcDriver::DriverDetail::InvocationFor(snapshot, 0, device.Serial(), registeredRequest);
-    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 0, device.Serial(), request)); }, "does not refer to registered code");
-    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 1, device.Serial(), registeredRequest)); }, "outside the snapshot");
-    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 0, device.Serial() + 1, registeredRequest)); }, "artifact is missing");
+    const auto invocation = AgcDriver::DriverDetail::InvocationFor(snapshot, 0, registeredRequest);
+    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 0, request)); }, "does not refer to registered code");
+    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 1, registeredRequest)); }, "outside the snapshot");
     registeredRequest.context.compute->numThreads[0] = 2;
-    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 0, device.Serial(), registeredRequest)); }, "artifact is missing");
+    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 0, registeredRequest)); }, "artifact is missing");
     ShaderRecompiler::SrtRuntime preparedRuntime{};
     preparedRuntime.userData = users;
     const auto preparedCapture = invocation.Capture(preparedRuntime);
@@ -73,11 +71,25 @@ void Run(AgcDriver::VulkanDevice& device) {
     Require(changedResult != firstResult && changedResult->spirv.data() == firstResult->spirv.data(), "prepared invocation did not distinguish changed runtime data");
     users[0] -= 1;
     Require(invocation.Materialize(*preparedCapture) == firstResult, "prepared invocation evicted the previous runtime data");
+    auto replacement = OpenVulkanTestDevice();
+    Require(replacement != nullptr && replacement->Serial() != device.Serial(), "replacement device was not created");
+    auto replacementRequest = request;
+    replacementRequest.target = replacement->ComputeTarget(32);
+    Require(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, replacementRequest) == handle, "device replacement discarded a compatible prepared artifact");
+    replacementRequest.shader.code = snapshot.code;
+    const auto replacementInvocation = AgcDriver::DriverDetail::InvocationFor(snapshot, 0, replacementRequest);
+    const auto replacementCapture = replacementInvocation.Capture(preparedRuntime);
+    const auto replacementResult = replacementInvocation.Materialize(*replacementCapture);
+    Require(replacementResult->spirv.data() == artifact.spirv.data(), "device replacement recompiled the prepared shader");
+    replacement->Dispatch(*replacementResult, 1, 1, 1);
+    replacement->WaitIdle();
+    replacementRequest.target.nonConstantImageOffsets = !replacementRequest.target.nonConstantImageOffsets;
+    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 0, replacementRequest)); }, "artifact is missing");
     ShaderRecompiler::SrtRuntime runtime{};
     runtime.userData = users;
     const auto capture = ShaderRecompiler::CaptureResources(request, runtime, *handle);
     request.context.compute->numThreads[0] = 2;
-    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, device.Serial(), request)); }, "artifact is missing");
+    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, request)); }, "artifact is missing");
     ExpectFailure([&] { static_cast<void>(ShaderRecompiler::CaptureResources(request, runtime, *handle)); }, "does not match the static ABI");
     ExpectFailure([&] { static_cast<void>(ShaderRecompiler::MaterializeShader(request, *capture, *handle)); }, "does not match the static ABI");
     const auto otherHandle = ShaderRecompiler::PrepareShader(request);
@@ -86,10 +98,10 @@ void Run(AgcDriver::VulkanDevice& device) {
     ExpectFailure([&] { static_cast<void>(ShaderRecompiler::MaterializeShader(request, *capture, *otherHandle)); }, "another prepared shader");
     request.context.compute->numThreads[0] = 1;
     request.layout.pushConstantSizeBytes = 124;
-    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, device.Serial(), request)); }, "artifact is missing");
+    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, request)); }, "artifact is missing");
     request.layout.pushConstantSizeBytes = 128;
     code[0] = 0xffffffffu;
-    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, device.Serial(), request)); }, "artifact is missing");
+    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, request)); }, "artifact is missing");
 }
 
 void PrepareMultisampledStorage(AgcDriver::VulkanDevice& device) {
@@ -97,6 +109,8 @@ void PrepareMultisampledStorage(AgcDriver::VulkanDevice& device) {
     std::array<std::uint32_t, 13> code{0xd7460000u, 0x0401060cu, 0xd7460001u, 0x0405060du, 0x7e04020eu, 0x7e060280u, 0x7e080208u, 0x7e0a0209u, 0x7e0c020au, 0x7e0e020bu, 0xf0200f38u, 0x00000400u, 0xbf810000u};
     RecompileRequest request{};
     request.shader = {ShaderStage::Compute, 0x30000u, code, 0, {}};
+    const std::array<std::uint32_t, 16> users{};
+    request.context.userData = users;
     request.context.waveSize = 32;
     request.context.compute = ShaderComputeStageInfo{{8, 8, 1}, 0, {true, true, false}, false, 2, {}};
     request.target = device.ComputeTarget(32);

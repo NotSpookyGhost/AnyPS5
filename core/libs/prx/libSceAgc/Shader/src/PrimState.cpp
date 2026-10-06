@@ -1,6 +1,7 @@
 #include "prx/libSceAgc/Shader/include/PrimState.hpp"
 
 #include <cstdio>
+#include <array>
 #include <stdexcept>
 #include <prx/libc/include/General.hpp>
 
@@ -62,8 +63,8 @@ int APS5_VABI sceAgcCreatePrimState(ShaderRegister* cx_regs, ShaderRegister* uc_
     }
 
     if (cx_regs != nullptr && uc_regs != nullptr) {
-        AgcDriverResolveShaderAbi_nid_postfix(gs, {cx_regs, 2}, {uc_regs, 3});
-        if (hs != nullptr) AgcDriverResolveShaderAbi_nid_postfix(hs, {cx_regs, 2}, {uc_regs, 3});
+        const std::array<const Shader*, 2> stages{hs, gs};
+        AgcDriverResolveGraphicsStagesAbi_nid_postfix(std::span(stages).subspan(hs == nullptr ? 1u : 0u), {cx_regs, 2}, {uc_regs, 3});
     }
     return 0;
 }

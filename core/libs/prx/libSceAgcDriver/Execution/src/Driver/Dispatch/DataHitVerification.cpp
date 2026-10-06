@@ -6,14 +6,14 @@
 
 namespace AgcDriver::DriverDetail {
 
-void Driver::verifyDataHit(const ShaderSnapshot& snapshot, std::size_t codeOffset, std::uint64_t deviceSerial, ShaderRecompiler::RecompileRequest request, std::span<const ShaderRecompiler::MemoryRegion> memory, std::uint64_t address, const DispatchVariant& variant, std::span<const std::uint32_t> liveWords, const ShaderRecompiler::RecompileResult& patched) {
+void Driver::verifyDataHit(const ShaderSnapshot& snapshot, std::size_t codeOffset, ShaderRecompiler::RecompileRequest request, std::span<const ShaderRecompiler::MemoryRegion> memory, std::uint64_t address, const DispatchVariant& variant, std::span<const std::uint32_t> liveWords, const ShaderRecompiler::RecompileResult& patched) {
     const auto fail = [&](const char* what, std::size_t position, std::size_t slot) {
         std::fprintf(stderr, "[dispatch-cache] APS5_VERIFY_DATA_HITS: %s disagrees (program 0x%llx, position %zu, slot %zu)\n", what, static_cast<unsigned long long>(address), position, slot);
         std::fflush(stderr);
         std::abort();
     };
     auto verifyMemory = std::make_shared<ShaderMemory>(memory, &queryPendingWrite, &observePendingWrite, hookWaitCounter());
-    const auto invocation = InvocationFor(snapshot, codeOffset, deviceSerial, request);
+    const auto invocation = InvocationFor(snapshot, codeOffset, request);
     const auto capture = verifyMemory->Capture(invocation);
     const auto regions = verifyMemory->Regions();
     request.context.memory = regions;
