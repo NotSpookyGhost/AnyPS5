@@ -513,6 +513,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
     DescriptorBindingBuilder{}.Populate(bindings, variant.info.info, variant.info.stage, variant.info.userDataBase, snapshot, partialThreads(request), request.context.pixel ? std::span<const std::uint8_t>(request.context.pixel->targetExportMapping) : std::span<const std::uint8_t>{});
     result.bindings = std::move(bindings.bindings);
     result.specialization = std::move(bindings.specialization);
+    if (variant.bindings.layout.UsesPushData()) result.specialization.push_back({PipelineSpecialization::PushDataOffset, request.layout.pushConstantOffsetBytes / 4u});
     result.pushConstants = std::move(bindings.pushConstants);
     result.vertexAttributes.reserve(result.vertexInputs.size());
     std::array<std::uint32_t, ShaderVertexStageInfo::MaxResources> vertexClasses{};
@@ -693,6 +694,7 @@ std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapsh
     mix(snapshot.uniformFill.words);
     mix(snapshot.uniformFill.value);
     for (const auto threads : partialThreads(request)) mix(threads);
+    mix(request.layout.pushConstantOffsetBytes);
     if (request.context.pixel) {
         for (const auto mapping : request.context.pixel->targetExportMapping) mix(mapping);
     }
@@ -864,7 +866,14 @@ std::shared_ptr<const SourceHandle> PrepareShader(const RecompileRequest& reques
 }
 
 bool MatchesPreparedShader(const RecompileRequest& request, const SourceHandle& handle) {
-    if (handle.source == nullptr || handle.artifact == nullptr || !sameLayout(handle.artifact->layout, request.layout)) return false;
+    if (handle.source == nullptr || handle.artifact == nullptr) return false;
+    const auto& layout = request.layout;
+    const auto& prepared = handle.artifact->bindings.layout;
+    if (layout.descriptorSet != handle.artifact->layout.descriptorSet || layout.firstBinding != handle.artifact->layout.firstBinding) return false;
+    if (layout.pushConstantOffsetBytes % 4u != 0u || layout.pushConstantSizeBytes % 4u != 0u || layout.pushConstantOffsetBytes > NativePushConstantSize || layout.pushConstantSizeBytes > NativePushConstantSize - layout.pushConstantOffsetBytes) return false;
+    const auto words = prepared.ShaderDataDwords();
+    const bool usesPush = prepared.runtimeImageCount == 0u && words != 0u && words <= layout.pushConstantSizeBytes / 4u;
+    if (prepared.UsesPushData() != usesPush) return false;
     struct PreparedKeyStorage {};
     auto& key = HostThreadLocal<std::vector<std::uint64_t>, PreparedKeyStorage>();
     RecompileCacheKey::BuildInterface(request, key);

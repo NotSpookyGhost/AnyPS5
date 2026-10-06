@@ -20,6 +20,7 @@ inline constexpr std::uint32_t ImageBase = 1024u;
 inline constexpr std::uint32_t ImageWords = 5u;
 inline constexpr std::uint32_t VertexBase = 4096u;
 inline constexpr std::uint32_t VertexWords = 6u;
+inline constexpr std::uint32_t PushDataOffset = 8188u;
 inline constexpr std::uint32_t ExportBase = 8192u;
 inline constexpr std::uint32_t HeapCountBase = 8256u;
 inline constexpr std::uint32_t MipCountBase = 8320u;
