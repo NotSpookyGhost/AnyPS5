@@ -206,6 +206,7 @@ function(add_shader_recompiler target runtimeTarget)
     string(TOUPPER "${CMAKE_BUILD_TYPE}" shaderCacheBuildType)
     set(shaderCacheExtra "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} ${CMAKE_BUILD_TYPE} spirv-tools=${ANYPS5_ENABLE_SPIRV_TOOLS} ${CMAKE_SYSTEM_PROCESSOR} flags=${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${shaderCacheBuildType}}")
     set(shaderCacheReviewedNames
+            BuildPreparedShaderKey
             BuildRectListShaders
             CaptureResources
             DebugProbeActive
@@ -213,6 +214,8 @@ function(add_shader_recompiler target runtimeTarget)
             HashBytes
             PixelInput
             PixelInputBit
+            RayTracingStrict
+            RayTracingMiss
             ReadWholeFile
             Recompile
             RecompileCacheKey::ContextHash
