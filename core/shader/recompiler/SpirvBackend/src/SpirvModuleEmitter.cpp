@@ -1114,13 +1114,19 @@ void EmitSetAttribute(SpirvValueEmitContext& ctx, const IrValue& inst) {
         const bool uintOutput = MrtOutputMode(state, exp) == 7u;
         const auto vectorType = uintOutput ? TypeU32Vector(state, 4u) : TypeF32Vector(state, 4u);
         auto value = ExportVector(ctx, data, exp, uintOutput);
-        if (state.program.Resources().stage == IrShaderStage::Pixel && exp.kind == ExportTargetKind::Mrt && exp.index < state.inputInfo.pixel->targetExportMapping.size()) {
-            const auto& mapping = state.inputInfo.pixel->targetExportMapping.at(exp.index);
-            if (!mapping.IsIdentity()) {
-                const auto mapped = state.module.AllocateId();
-                state.module.AddFunction(spv::OpVectorShuffle, vectorType, mapped, value, value, mapping.Map(0), mapping.Map(1), mapping.Map(2), mapping.Map(3));
-                value = mapped;
+        if (state.program.Resources().stage == IrShaderStage::Pixel && exp.kind == ExportTargetKind::Mrt) {
+            if (exp.index >= 8u) throw std::runtime_error("fragment export target exceeds the runtime mapping table");
+            const auto mapping = EmitShaderDataDwordLoad(state, RuntimeAbi::ExportMappingsDword + exp.index);
+            std::array<std::uint32_t, 4> components{};
+            for (std::uint32_t component = 0; component < components.size(); ++component) {
+                const auto shifted = Binary(state, spv::OpShiftRightLogical, TypeU32(state), mapping, ConstantU32(state, component * 2u));
+                const auto index = Binary(state, spv::OpBitwiseAnd, TypeU32(state), shifted, ConstantU32(state, 3u));
+                components[component] = state.module.AllocateId();
+                state.module.AddFunction(spv::OpVectorExtractDynamic, uintOutput ? TypeU32(state) : TypeF32(state), components[component], value, index);
             }
+            const auto mapped = state.module.AllocateId();
+            state.module.AddFunction(spv::OpCompositeConstruct, vectorType, mapped, components[0], components[1], components[2], components[3]);
+            value = mapped;
         }
         if (exp.kind == ExportTargetKind::Position) {
             if (state.inputInfo.vertex == nullptr) {

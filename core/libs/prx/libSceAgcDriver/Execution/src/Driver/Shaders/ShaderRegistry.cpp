@@ -207,9 +207,7 @@ std::vector<PreparedShaders::Entry> PrepareRegistered(const ShaderSnapshot& snap
     } else if (stage == Stage::Fragment) {
         const auto count = RegisterValue(state.context, 0x1b6) & 0x3fu;
         if (registration && count != 0) return {};
-        std::array<std::uint8_t, 8> mappings;
-        mappings.fill(0xe4u);
-        pixel = Graphics::DecodePixelStageInfo(state.context, mappings);
+        pixel = Graphics::DecodePixelStageInfo(state.context, {});
         wave = pixel->wave32 ? 32u : 64u;
     } else {
         const auto routing = RegisterValue(state.context, 0x2d5);

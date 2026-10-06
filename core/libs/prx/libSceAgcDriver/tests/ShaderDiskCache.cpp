@@ -410,6 +410,17 @@ void verifyKeySensitivity() {
     input.resources[0].fields = {};
     input.resourcesNum = 0u;
     require(vertex.Key() == embeddedKey, "runtime vertex fetch descriptors changed the artifact key");
+    SampleRequest fragment;
+    fragment.request.shader.stage = ShaderStage::Fragment;
+    fragment.request.context.compute.reset();
+    fragment.request.context.pixel.emplace();
+    fragment.request.context.pixel->targetOutputMode[0] = 9;
+    const auto fragmentKey = fragment.Key();
+    const auto fragmentContextKey = RecompileCacheKey::ContextHash(fragment.request);
+    fragment.request.context.pixel->targetExportMapping.fill(0x1bu);
+    require(fragment.Key() == fragmentKey && RecompileCacheKey::ContextHash(fragment.request) == fragmentContextKey, "runtime export mapping changed the fragment artifact key");
+    fragment.request.context.pixel->targetOutputMode[0] = 7;
+    require(fragment.Key() != fragmentKey, "integer fragment output reused a float interface");
 }
 
 void verifyStore() {

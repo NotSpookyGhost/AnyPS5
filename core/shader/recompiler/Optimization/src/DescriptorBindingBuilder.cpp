@@ -138,98 +138,12 @@ std::vector<std::uint32_t> GuestSamplersDescriptor(const std::vector<std::uint32
     return result;
 }
 
-constexpr std::uint32_t ForceUnnormalizedBit = 1u << 15u;
+std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, const ShaderInfo& info, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::span<const std::uint32_t> imageModes, std::span<const std::uint8_t> exportMappings) {
 
-[[noreturn]] void failUnnormalized(const char* reason) {
-    fail(std::string("DescriptorBindingBuilder::Populate unnormalized guest sampler ") + reason + ", which is not implemented");
-}
-
-const char* UnnormalizedUseReason(std::uint32_t uses) {
-    switch (uses & (~uses + 1u)) {
-        case SamplerUseImplicitLod: return "is used by an implicit-LOD sample";
-        case SamplerUseGradient: return "is used by a sample with derivatives";
-        case SamplerUseOffset: return "is used with a texel offset";
-        case SamplerUseCompare: return "is used with depth comparison";
-        case SamplerUseGather: return "is used by a gather";
-        case SamplerUseQueryLod: return "is used by image_get_lod";
-        default: return "is used by an image_sample_*_a variant";
-    }
-}
-
-struct UnnormalizedProof {
-    std::vector<bool> samplers;
-    std::vector<bool> images;
-};
-
-UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapshot& snapshot) {
-    UnnormalizedProof proof{std::vector<bool>(info.samplers.size()), std::vector<bool>(info.images.size())};
-    for (std::uint32_t r = 0; r < info.samplers.size(); r++) {
-        if ((GuestSamplersDescriptor({r}, snapshot)[0] & ForceUnnormalizedBit) == 0u) {
-            continue;
-        }
-        const auto& sampler = info.samplers[r];
-        const std::uint32_t unsupported = sampler.uses & ~static_cast<std::uint32_t>(SamplerUseExplicitLod);
-        if (unsupported != 0u) {
-            failUnnormalized(UnnormalizedUseReason(unsupported));
-        }
-        if (sampler.depthCompare) {
-            failUnnormalized("is used with depth comparison");
-        }
-        for (const auto& pair : info.sampledPairs) {
-            if (pair.sampler != r) {
-                continue;
-            }
-            const auto& image = info.images.at(pair.image);
-            if (image.indirectRoot != ImageResource::NoIndirectImage) {
-                failUnnormalized("samples an image selected at run time");
-            }
-            if ((image.dimension != RdnaImageDimension::Dim1D && image.dimension != RdnaImageDimension::Dim2D) || image.cube) {
-                failUnnormalized("samples a 1D-array, 2D-array, 3D, cube or multisampled image");
-            }
-            if (image.depthCompare) {
-                failUnnormalized("is used with depth comparison");
-            }
-            if (image.conversionFormat != IrBufferFormat::Invalid || image.packed) {
-                failUnnormalized("samples an image that needs a format conversion or packed access");
-            }
-            proof.images[pair.image] = true;
-        }
-        proof.samplers[r] = true;
-    }
-    return proof;
-}
-
-std::vector<std::uint32_t> SamplerElements(const IrBindingLayout& layout, const ShaderInfo& info) {
-    std::vector<std::uint32_t> elements(info.samplers.size(), ShaderInfo::MaxSamplers);
-    for (const IrDescriptorBinding& logical : layout.descriptors) {
-        if (logical.kind != DescriptorBindingKind::Samplers) {
-            continue;
-        }
-        for (std::uint32_t element = 0; element < logical.resources.size() && element < ShaderInfo::MaxSamplers; element++) {
-            elements.at(logical.resources[element]) = element;
-        }
-    }
-    return elements;
-}
-
-std::uint32_t ImageSamplerMask(const ShaderInfo& info, const std::vector<std::uint32_t>& samplerElements, std::uint32_t resource) {
-    const std::uint32_t root = info.images.at(resource).indirectRoot;
-    std::uint32_t mask = 0;
-    for (const SampledResourcePair& pair : info.sampledPairs) {
-        if (pair.image != resource && pair.image != root) {
-            continue;
-        }
-        if (pair.sampler >= samplerElements.size() || samplerElements[pair.sampler] >= ShaderInfo::MaxSamplers) {
-            fail("DescriptorBindingBuilder::Populate sampled image pair names a sampler outside the first " + std::to_string(ShaderInfo::MaxSamplers) + " elements of the sampler binding");
-        }
-        mask |= 1u << samplerElements[pair.sampler];
-    }
-    return mask;
-}
-
-std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, const ShaderInfo& info, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::span<const std::uint32_t> imageModes) {
     RuntimeAbi::ShaderData data{};
     data.version = RuntimeAbi::Version;
+    if (!exportMappings.empty() && exportMappings.size() != data.exportMappings.size()) fail("invalid runtime export mapping count");
+    std::copy(exportMappings.begin(), exportMappings.end(), data.exportMappings.begin());
     if (snapshot.images.size() > data.images.size() || snapshot.samplers.size() > data.samplers.size()) fail("runtime resource metadata capacity exceeded");
     data.imageCount = static_cast<std::uint32_t>(snapshot.images.size());
     data.samplerCount = static_cast<std::uint32_t>(snapshot.samplers.size());
@@ -289,16 +203,17 @@ std::uint32_t PointFilteredSamplerWord(std::uint32_t word0, std::uint32_t filter
     return (filter & ~(0xffu << 20u)) | (1u << 24u) | (mipmapped ? 1u << 26u : 0u);
 }
 
-void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const IrProgram& program, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads) const {
-    Populate(allocation, program.Info(), program.Resources().stage, program.Resources().userDataBase, snapshot, partialThreads);
+void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const IrProgram& program, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::span<const std::uint8_t> exportMappings) const {
+    Populate(allocation, program.Info(), program.Resources().stage, program.Resources().userDataBase, snapshot, partialThreads, exportMappings);
 }
 
-void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads) const {
+void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::span<const std::uint8_t> exportMappings) const {
+    if (stage == IrShaderStage::Pixel && exportMappings.size() != 8u) fail("fragment runtime export mappings are missing");
     const IrBindingLayout& layout = allocation.layout;
     if (info.images.size() > ShaderInfo::MaxImages) fail("runtime image count exceeds the static capacity");
     std::array<std::uint32_t, ShaderInfo::MaxImages> imageModes{};
     for (std::size_t index = 0; index < info.images.size(); ++index) imageModes[index] = ResourceMaterializer::RuntimeImageMode(info.images[index], snapshot.images.at(index), info.runtimeImageModes.at(index));
-    const std::vector<std::uint32_t> shaderData = ShaderDataDwordsFor(layout, info, userDataBase, snapshot, partialThreads, imageModes);
+    const std::vector<std::uint32_t> shaderData = ShaderDataDwordsFor(layout, info, userDataBase, snapshot, partialThreads, imageModes, exportMappings);
     const UnnormalizedProof unnormalized = ProveUnnormalized(info, snapshot);
     const std::vector<std::uint32_t> samplerElements = SamplerElements(layout, info);
 

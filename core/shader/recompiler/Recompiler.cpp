@@ -368,7 +368,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
     bindings.layout = variant.bindings.layout;
     bindings.pushConstantOffsetBytes = variant.bindings.pushConstantOffsetBytes;
     bindings.pushConstantSizeBytes = variant.bindings.pushConstantSizeBytes;
-    DescriptorBindingBuilder{}.Populate(bindings, variant.info.info, variant.info.stage, variant.info.userDataBase, snapshot, partialThreads(request));
+    DescriptorBindingBuilder{}.Populate(bindings, variant.info.info, variant.info.stage, variant.info.userDataBase, snapshot, partialThreads(request), request.context.pixel ? std::span<const std::uint8_t>(request.context.pixel->targetExportMapping) : std::span<const std::uint8_t>{});
     result.bindings = std::move(bindings.bindings);
     result.pushConstants = std::move(bindings.pushConstants);
     result.vertexAttributes.reserve(result.vertexInputs.size());
@@ -520,6 +520,9 @@ std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapsh
     mix(snapshot.uniformFill.words);
     mix(snapshot.uniformFill.value);
     for (const auto threads : partialThreads(request)) mix(threads);
+    if (request.context.pixel) {
+        for (const auto mapping : request.context.pixel->targetExportMapping) mix(mapping);
+    }
     if (request.context.vertex && !request.context.vertex->fetchEmbedded) {
         const auto& vertex = *request.context.vertex;
         const auto count = std::min<std::uint32_t>(vertex.resourcesNum, ShaderVertexStageInfo::MaxResources);

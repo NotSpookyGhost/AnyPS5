@@ -122,7 +122,6 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         place(PixelInput::Ancillary, pixel.ancillary);
         for (std::uint32_t i = 0; i < 8; ++i) {
             pixelStorage.targetOutputMode[i] = pixel.targetOutputMode[i];
-            pixelStorage.targetExportMapping[i].packed = pixel.targetExportMapping[i];
         }
         pixelStorage.psPosX = pixel.posX;
         pixelStorage.psPosY = pixel.posY;
