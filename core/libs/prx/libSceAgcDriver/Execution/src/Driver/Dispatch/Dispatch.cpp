@@ -49,14 +49,6 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         packet = resolved;
         indirectArguments = 0;
     }
-    if (fillBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice)) {
-        pendingDispatchPhases().outcome = DispatchOutcome::FillHle;
-        return;
-    }
-    if (indirectArguments == 0 && copyBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice, address)) {
-        pendingDispatchPhases().outcome = DispatchOutcome::CopyHle;
-        return;
-    }
     if (indirectArguments == 0 && (packet[4] & 0x20u) != 0) {
         const std::array<std::uint32_t, 3> threads{packet[1], packet[2], packet[3]};
         for (std::uint32_t axis = 0; axis < 3; ++axis) {
@@ -98,12 +90,14 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         if (probeThis) std::fprintf(stderr, "[gpu] probing dispatch %llu of 0x%llx\n", static_cast<unsigned long long>(probeDispatch.second), static_cast<unsigned long long>(address));
     }
 
-    if (FailureMemo() && snapshot.handles->poisoned.load(std::memory_order_relaxed) != 0) {
-        const std::string* poisoned = nullptr;
-        if (SourceHandleFor(snapshot, codeOffset, localDevice->Serial(), request, probeThis, &poisoned) == nullptr && poisoned != nullptr) {
-            pendingDispatchPhases().outcome = DispatchOutcome::SkippedMemo;
-            return;
-        }
+    const auto preparedHandle = SourceHandleFor(snapshot, codeOffset, localDevice->Serial(), request);
+    if (fillBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice)) {
+        pendingDispatchPhases().outcome = DispatchOutcome::FillHle;
+        return;
+    }
+    if (indirectArguments == 0 && copyBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice, address)) {
+        pendingDispatchPhases().outcome = DispatchOutcome::CopyHle;
+        return;
     }
     const bool noDispatchCache = noDispatchCacheEnv || probeThis;
     std::uint64_t key = 0xcbf29ce484222325ull;
@@ -198,7 +192,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             } probeScope{probeThis};
             const auto waitedBefore = traceCapSync() ? Graphics::Recorder::ThreadWaitedMs() : 0.0;
             forgetAtCapture = GuestMemory::ForgetSerial();
-            const auto handle = SourceHandleFor(snapshot, codeOffset, localDevice->Serial(), request, probeThis);
+            const auto& handle = preparedHandle;
             capture = [&] {
                 const SampledReadScope sampling(evidenceReads);
                 return shaderMemory->Capture(request, handle.get());
@@ -211,10 +205,9 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             if (dumpShaders) static_cast<void>(dumpRequest(address, request));
             const auto started = std::chrono::steady_clock::now();
 
-            static const bool reuseCapture = std::getenv("APS5_NO_CAPTURE_REUSE") == nullptr;
-            bool memoHit = false;
-            compiledResult = reuseCapture ? ShaderRecompiler::Recompile(request, *capture, &memoHit) : std::make_shared<const ShaderRecompiler::RecompileResult>(ShaderRecompiler::Recompile(request));
-            if (compiledResult->cacheHit || memoHit) ++cacheHits;
+
+            compiledResult = ShaderRecompiler::MaterializeShader(request, *capture, *handle);
+            if (compiledResult->cacheHit) ++cacheHits;
             const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
             static double totalMs = 0;
             totalMs += elapsed;

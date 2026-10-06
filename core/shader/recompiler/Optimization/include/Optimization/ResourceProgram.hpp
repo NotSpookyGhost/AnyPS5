@@ -34,9 +34,16 @@ struct ResourceCapture {
 // request with the same code and the same cache key fields (RecompileCacheKey::ContextHash plus
 // the target); the vertex stages' input validation is repeated per capture because it reads V#
 // fields the key does not cover. Null for a request that bypasses the cache (useCache false).
+struct CompiledVariant;
 struct SourceHandle {
     std::shared_ptr<SourceEntry> source;
+    std::shared_ptr<const CompiledVariant> artifact;
+    std::vector<std::uint64_t> staticKey;
 };
+[[nodiscard]] std::shared_ptr<const SourceHandle> PrepareShader(const RecompileRequest& request);
+[[nodiscard]] bool MatchesPreparedShader(const RecompileRequest& request, const SourceHandle& handle);
+[[nodiscard]] const CompiledShaderArtifact& GetPreparedArtifact(const SourceHandle& handle);
+[[nodiscard]] std::shared_ptr<const RecompileResult> MaterializeShader(const RecompileRequest& request, const ResourceCapture& capture, const SourceHandle& handle);
 [[nodiscard]] std::shared_ptr<const SourceHandle> ResolveSource(const RecompileRequest& request);
 [[nodiscard]] std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& request, const SrtRuntime& runtime, const SourceHandle& handle);
 

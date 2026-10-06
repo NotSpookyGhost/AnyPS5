@@ -5,6 +5,7 @@
 #include <prx/libc/include/General.hpp>
 
 #include "SceShaders.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderUtils.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderConstants.hpp"
 
@@ -56,6 +57,7 @@ int CreateInterpolantMapping(const char* fn, ShaderRegister* regs, const Shader*
 
     if (ps == nullptr || ps->num_input_semantics == 0) {
         FillIdentityInterpolants(regs, 0);
+        if (ps != nullptr) AgcDriverResolveShaderAbi_nid_postfix(ps, {regs, 32}, {});
         return 0;
     }
 
@@ -82,6 +84,7 @@ int CreateInterpolantMapping(const char* fn, ShaderRegister* regs, const Shader*
     }
 
     FillIdentityInterpolants(regs, ps->num_input_semantics);
+    AgcDriverResolveShaderAbi_nid_postfix(ps, {regs, 32}, {});
     return 0;
 }
 

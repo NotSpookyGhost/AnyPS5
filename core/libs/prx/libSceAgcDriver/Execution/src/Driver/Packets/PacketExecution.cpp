@@ -29,15 +29,6 @@ void Driver::timed(double WorkerProfile::*bucket, TWork&& work) {
     }
 }
 
-template <typename TWork>
-void Driver::tolerate(const char* kind, TWork&& work) {
-    try {
-        work();
-    } catch (const std::exception& error) {
-        reportSkip(kind, error.what());
-    }
-}
-
 void Driver::execute(const Submission& submission) {
     if (submission.suspend) {
 
@@ -234,7 +225,7 @@ void Driver::execute(const Submission& submission) {
             }
         } else if (drawPacket) {
             bool drawn = false;
-            timed(&WorkerProfile::drawMs, [&] { tolerate("draw", [&] {
+            timed(&WorkerProfile::drawMs, [&] {
                 static const bool traceDraws = std::getenv("APS5_TRACE_DRAWS") != nullptr;
                 static const bool profileDraws = std::getenv("APS5_PROFILE_DRAW") != nullptr;
                 const auto color = (static_cast<std::uint64_t>(readRegister(queue.context, 0x390)) << 40u) | (static_cast<std::uint64_t>(readRegister(queue.context, 0x318)) << 8u);
@@ -243,36 +234,14 @@ void Driver::execute(const Submission& submission) {
                     if (profileDraws) Graphics::CountDrawSkip(kind, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started).count());
                 };
 
-                const auto skipped = [&](const std::string& what) {
-                    if (traceDraws) std::fprintf(stderr, "[draw] target 0x%llx mask 0x%x failed: %.160s\n",static_cast<unsigned long long>(color), readRegister(queue.context, 0x8e), what.c_str());
-
-                    char suffix[80];
-                    std::snprintf(suffix, sizeof(suffix), " [%s, color target 0x%llx]", Pm4::Name(header).c_str(), static_cast<unsigned long long>(color));
-
-                    static std::set<std::pair<std::uint64_t, std::string>> dumpedTargets;
-                    const std::string reason = what.substr(0, 48);
-                    if (dumpedTargets.insert({color, reason}).second) {
-                        char name[64];
-                        std::snprintf(name, sizeof(name), "draw_%llx_%08x.regs", static_cast<unsigned long long>(color), static_cast<std::uint32_t>(std::hash<std::string>{}(reason)));
-                        if (std::FILE* file = std::fopen(name, "w")) {
-                            std::fprintf(file, "# %s\n", what.c_str());
-                            recent.Print(file, "# packet %s\n");
-                            for (const auto& [offset, value] : queue.context) std::fprintf(file, "context %x %08x\n", offset, value);
-                            for (const auto& [offset, value] : queue.userConfig) std::fprintf(file, "uconfig %x %08x\n", offset, value);
-                            for (const auto& [offset, value] : queue.shader) std::fprintf(file, "shader %x %08x\n", offset, value);
-                            std::fclose(file);
-                        }
-                    }
-                    reportSkip("draw", what + suffix);
-                };
                 try {
                     std::string rejected;
                     const auto verdict = draw(queue, packet, submission, rejected);
                     drawn = verdict == DrawVerdict::Drawn;
                     CaptureTrace::Log("draw submission=%llu queue=%x offset=%zu target=%llx mask=%x verdict=%d reason=%.256s", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, static_cast<unsigned long long>(color), readRegister(queue.context, 0x8e), static_cast<int>(verdict), rejected.c_str());
                     if (verdict == DrawVerdict::Rejected) {
-                        skipped(rejected);
                         countSkip(Graphics::DrawSkip::Prechecked);
+                        throw std::runtime_error(rejected);
                     } else if (verdict == DrawVerdict::Nothing) {
                         countSkip(Graphics::DrawSkip::Nothing);
                     } else if (traceDraws) {
@@ -280,10 +249,10 @@ void Driver::execute(const Submission& submission) {
                     }
                 } catch (const std::exception& error) {
                     CaptureTrace::Log("draw-error submission=%llu offset=%zu reason=%.256s", static_cast<unsigned long long>(submission.serial), cursor, error.what());
-                    skipped(error.what());
                     countSkip(Graphics::DrawSkip::Thrown);
+                    throw;
                 }
-            }); });
+            });
             finishDrawPacket(drawn);
         } else if (opcode == 0x22) {
             recordQueuedLabelsBeforeRead(submission.queue);

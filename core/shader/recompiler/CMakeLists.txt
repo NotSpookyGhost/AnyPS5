@@ -216,6 +216,10 @@ function(add_shader_recompiler target runtimeTarget)
             Recompile
             RecompileCacheKey::ContextHash
             RecompileResult
+            PrepareShader
+            MatchesPreparedShader
+            GetPreparedArtifact
+            MaterializeShader
             ResolveSource
             ResourceMaterializer::SpecializationNanoseconds
             RuntimeAbi::RequireVersion

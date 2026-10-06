@@ -664,7 +664,44 @@ std::shared_ptr<const SourceHandle> ResolveSource(const RecompileRequest& reques
     return std::make_shared<const SourceHandle>(SourceHandle{getSource(request)});
 }
 
+std::shared_ptr<const SourceHandle> PrepareShader(const RecompileRequest& request) {
+    return recompileReporting(request, [&]() -> std::shared_ptr<const SourceHandle> {
+        static_cast<void>(RequestInputInfo(request));
+        auto handle = std::make_shared<SourceHandle>();
+        handle->source = getSource(request);
+        RecompileCacheKey::Build(request, handle->staticKey);
+        handle->staticKey.push_back(HostSubgroupSize(request));
+        bool cacheHit = false;
+        std::lock_guard lock(handle->source->mutex);
+        handle->artifact = findOrCompileVariant(*handle->source, request, cacheHit);
+        return handle;
+    });
+}
+
+bool MatchesPreparedShader(const RecompileRequest& request, const SourceHandle& handle) {
+    if (handle.source == nullptr || handle.artifact == nullptr || !sameLayout(handle.artifact->layout, request.layout)) return false;
+    std::vector<std::uint64_t> key;
+    RecompileCacheKey::Build(request, key);
+    key.push_back(HostSubgroupSize(request));
+    return key == handle.staticKey && std::ranges::equal(handle.source->code, request.shader.code);
+}
+
+const CompiledShaderArtifact& GetPreparedArtifact(const SourceHandle& handle) {
+    if (handle.artifact == nullptr) throw std::runtime_error("ShaderRecompiler: prepared artifact is missing");
+    return handle.artifact->artifact;
+}
+
+std::shared_ptr<const RecompileResult> MaterializeShader(const RecompileRequest& request, const ResourceCapture& capture, const SourceHandle& handle) {
+    if (!MatchesPreparedShader(request, handle)) throw std::runtime_error("ShaderRecompiler: prepared artifact does not match the static ABI");
+    if (capture.source != handle.source || capture.plan != handle.source->plan) throw std::runtime_error("ShaderRecompiler: resource capture belongs to another prepared shader");
+    auto result = std::make_shared<RecompileResult>(materializeResult(*handle.artifact, request, capture.snapshot));
+    result->cacheHit = true;
+    return result;
+}
+
 std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& request, const SrtRuntime& runtime, const SourceHandle& handle) {
+    if (handle.source == nullptr) throw std::runtime_error("ShaderRecompiler: source handle is missing");
+    if (handle.artifact != nullptr && !MatchesPreparedShader(request, handle)) throw std::runtime_error("ShaderRecompiler: prepared artifact does not match the static ABI");
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     const auto started = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     // The whole vertex family (Vertex, Local, TC, TE, Mesh) validates V# fields the memo key does not cover.

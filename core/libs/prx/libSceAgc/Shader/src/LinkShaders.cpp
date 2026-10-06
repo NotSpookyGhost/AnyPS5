@@ -1,4 +1,5 @@
 #include "SceShaders.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderConstants.hpp"
 #include <array>
@@ -24,6 +25,7 @@ extern "C" int APS5_VABI sceAgcLinkShaders(ShaderRegister* context, ShaderRegist
     std::array<ShaderRegister, 3> primitiveValues{};
     sceAgcCreatePrimState(contextValues.data(), primitiveValues.data(), nullptr, vertex, primitiveType);
     sceAgcCreateInterpolantMapping(contextValues.data() + 2, vertex, pixel);
+    AgcDriverResolveGraphicsAbi_nid_postfix(vertex, pixel, primitiveType);
     std::copy(contextValues.begin(), contextValues.end(), context);
     std::copy(primitiveValues.begin(), primitiveValues.end(), primitive);
     return 0;

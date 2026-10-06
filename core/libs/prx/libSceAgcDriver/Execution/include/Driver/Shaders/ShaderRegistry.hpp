@@ -14,35 +14,38 @@
 
 namespace AgcDriver::DriverDetail {
 
-struct HandleMemos {
+struct PreparedShaders {
     struct Entry {
-        std::uint64_t key = 0;
+        std::size_t codeOffset;
+        std::uint64_t deviceSerial;
         std::shared_ptr<const ShaderRecompiler::SourceHandle> handle;
-        std::shared_ptr<const std::string> failure;
+    };
+    struct Rectangle {
+        std::uint64_t vertexId;
+        std::uint64_t fragmentId;
+        ShaderRecompiler::RectListShaders shaders;
     };
     std::mutex mutex;
-    std::array<Entry, 8> entries;
-    std::size_t next = 0;
-    std::atomic<std::uint32_t> poisoned{0};
+    std::vector<Entry> entries;
+    std::vector<Rectangle> rectangles;
 };
-
 struct ShaderSnapshot {
     std::uint64_t codeAddress;
     std::uint64_t headerAddress;
     std::uint8_t type;
     std::vector<std::uint32_t> code;
     std::vector<std::byte> header;
-    std::unique_ptr<HandleMemos> handles = std::make_unique<HandleMemos>();
+    std::unique_ptr<PreparedShaders> prepared = std::make_unique<PreparedShaders>();
 };
 
 using ShaderRegistry = std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>>;
 
-bool FailureMemo();
 std::shared_ptr<const ShaderSnapshot> ReadRawComputeShader(std::uint64_t address);
 
 std::uint64_t NullPixelProgramAddress();
+ShaderRecompiler::RectListShaders PreparedRectangle(const ShaderSnapshot& snapshot, std::uint64_t vertexId, std::uint64_t fragmentId);
 
-std::shared_ptr<const ShaderRecompiler::SourceHandle> SourceHandleFor(const ShaderSnapshot& snapshot, std::size_t codeOffset, std::uint64_t deviceSerial, const ShaderRecompiler::RecompileRequest& request, bool bypass, const std::string** poisoned = nullptr);
+std::shared_ptr<const ShaderRecompiler::SourceHandle> SourceHandleFor(const ShaderSnapshot& snapshot, std::size_t codeOffset, std::uint64_t deviceSerial, const ShaderRecompiler::RecompileRequest& request);
 
 }
 

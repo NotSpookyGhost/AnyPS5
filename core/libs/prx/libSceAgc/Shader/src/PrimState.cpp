@@ -5,6 +5,7 @@
 #include <prx/libc/include/General.hpp>
 
 #include "SceShaders.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderUtils.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderConstants.hpp"
 
@@ -60,6 +61,10 @@ int APS5_VABI sceAgcCreatePrimState(ShaderRegister* cx_regs, ShaderRegister* uc_
         }
     }
 
+    if (cx_regs != nullptr && uc_regs != nullptr) {
+        AgcDriverResolveShaderAbi_nid_postfix(gs, {cx_regs, 2}, {uc_regs, 3});
+        if (hs != nullptr) AgcDriverResolveShaderAbi_nid_postfix(hs, {cx_regs, 2}, {uc_regs, 3});
+    }
     return 0;
 }
 
