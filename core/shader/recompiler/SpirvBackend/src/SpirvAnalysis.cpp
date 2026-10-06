@@ -332,10 +332,8 @@ SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
                 }
                 const auto& memory = program.Resources().memoryInfo.at(memoryIndex);
                 requirements.coherentBuffers = requirements.coherentBuffers || (memory.coherent && !memory.gpuDescriptor);
-                if (memory.gpuDescriptor) {
+                if (!memory.planningOnly) {
                     requirements.subgroupLocalInvocationId = requirements.subgroupLocalInvocationId || program.Resources().stage == IrShaderStage::Compute;
-                } else if (!memory.planningOnly) {
-                    throw std::runtime_error("buffer operation requires runtime descriptor metadata");
                 }
             }
             const auto sharedAccess = SharedAccessOf(inst->Opcode());

@@ -2,6 +2,7 @@
 #define CORE_SHADER_RECOMPILIER_INCLUDE_SHADER_RECOMPILIER_RECOMPILER_HPP
 
 #include "RuntimeAbi.hpp"
+#include "PipelineSpecialization.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -424,6 +425,8 @@ struct CompiledShaderArtifact {
 };
 
 struct ShaderInvocation {
+    std::vector<PipelineSpecializationConstant> specialization;
+    std::uint64_t specializationId = 0;
     std::vector<DescriptorBinding> bindings;
     std::vector<std::byte> pushConstants;
     std::vector<VertexAttribute> vertexAttributes;
@@ -431,6 +434,7 @@ struct ShaderInvocation {
 
 struct RecompileResult : CompiledShaderArtifact, ShaderInvocation {
     bool cacheHit = false;
+    [[nodiscard]] std::uint64_t PipelineVariantId() const { return specializationId != 0 ? specializationId : variantId; }
 };
 
 [[nodiscard]] RecompileResult Recompile(const RecompileRequest& request);

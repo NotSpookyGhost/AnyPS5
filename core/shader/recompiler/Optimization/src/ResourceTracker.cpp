@@ -805,6 +805,8 @@ private:
             const auto resource = AddBuffer(source, memory, inst.Opcode(), inst.Flags<MemoryFlags>().pc);
             if (resource == std::numeric_limits<std::uint32_t>::max()) fail("buffer resource limit exceeded");
             AddMemoryPatch(memoryIndex, resource, 0u, false);
+            memory.gpuDescriptor = false;
+            return true;
         }
         memory.gpuDescriptor = true;
         m_info.usesDma = true;

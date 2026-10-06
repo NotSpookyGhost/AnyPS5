@@ -213,6 +213,27 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
     if (info.images.size() > ShaderInfo::MaxImages) fail("runtime image count exceeds the static capacity");
     std::array<std::uint32_t, ShaderInfo::MaxImages> imageModes{};
     for (std::size_t index = 0; index < info.images.size(); ++index) imageModes[index] = ResourceMaterializer::RuntimeImageMode(info.images[index], snapshot.images.at(index), info.runtimeImageModes.at(index));
+    allocation.specialization.clear();
+    for (std::uint32_t index = 0; index < info.buffers.size(); ++index) {
+        const auto& descriptor = snapshot.buffers.at(index);
+        if (descriptor.dwordCount != 4u) fail("buffer specialization requires four descriptor words");
+        const auto first = PipelineSpecialization::BufferBase + index * PipelineSpecialization::BufferWords;
+        allocation.specialization.push_back({first, descriptor.dwords[1] & 0xffff0000u});
+        allocation.specialization.push_back({first + 1u, descriptor.dwords[3]});
+        allocation.specialization.push_back({first + 2u, descriptor.dwords[0] != 0u || (descriptor.dwords[1] & 0xffffu) != 0u ? 1u : 0u});
+        if (info.buffers[index].formatted) {
+            for (std::uint32_t component = 0; component < 4u; ++component) {
+                const auto selector = (descriptor.dwords[3] >> (component * 3u)) & 7u;
+                if (selector == 2u || selector == 3u) fail("buffer specialization has a reserved component selector");
+            }
+        }
+    }
+    for (std::uint32_t index = 0; index < info.images.size(); ++index) {
+        if (info.images[index].indirectRoot != ImageResource::NoIndirectImage) continue;
+        const auto first = PipelineSpecialization::ImageBase + index * PipelineSpecialization::ImageWords;
+        allocation.specialization.push_back({first, imageModes[index]});
+        for (std::uint32_t component = 0; component < 4u; ++component) allocation.specialization.push_back({first + 1u + component, (snapshot.images.at(index).dwords[3] >> (component * 3u)) & 7u});
+    }
     const std::vector<std::uint32_t> shaderData = ShaderDataDwordsFor(layout, info, userDataBase, snapshot, partialThreads, imageModes, exportMappings);
     const UnnormalizedProof unnormalized = ProveUnnormalized(info, snapshot);
     const std::vector<std::uint32_t> samplerElements = SamplerElements(layout, info);

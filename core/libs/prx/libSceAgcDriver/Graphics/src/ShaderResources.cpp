@@ -1255,8 +1255,8 @@ std::vector<std::uint32_t> ShaderResources::ContentKey(const CompiledShader& sha
     key.reserve(8 + program.bindings.size() * 12);
     key.push_back(dataWords ? 1u : 0u);
     key.push_back(static_cast<std::uint32_t>(shader.stage));
-    key.push_back(static_cast<std::uint32_t>(program.variantId));
-    key.push_back(static_cast<std::uint32_t>(program.variantId >> 32u));
+    key.push_back(static_cast<std::uint32_t>(program.PipelineVariantId()));
+    key.push_back(static_cast<std::uint32_t>(program.PipelineVariantId() >> 32u));
     key.push_back(static_cast<std::uint32_t>(program.bindings.size()));
     const auto packBits = [&](const std::vector<bool>& bits) {
         key.push_back(static_cast<std::uint32_t>(bits.size()));

@@ -8,6 +8,7 @@
 #include "CompiledVariant.hpp"
 #include "ShaderDiskCache.hpp"
 #include <list>
+#include <map>
 #include <mutex>
 #include <new>
 #include <shared_mutex>
@@ -361,6 +362,19 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     return {request.layout, std::move(program).TakeCompiledInfo(), std::move(static_cast<CompiledBindingLayout&>(bindings)), std::move(result)};
 }
 
+std::uint64_t specializationId(std::uint64_t artifact, std::span<const PipelineSpecializationConstant> constants) {
+    if (constants.empty()) return 0;
+    std::vector<std::uint64_t> key{artifact};
+    key.reserve(constants.size() + 1u);
+    for (const auto& constant : constants) key.push_back((static_cast<std::uint64_t>(constant.id) << 32u) | constant.value);
+    static std::mutex mutex;
+    static std::map<std::vector<std::uint64_t>, std::uint64_t> variants;
+    std::lock_guard lock(mutex);
+    const auto [entry, inserted] = variants.try_emplace(std::move(key), 0);
+    if (inserted) entry->second = nextVariantId();
+    return entry->second;
+}
+
 RecompileResult materializeResult(const CompiledVariant& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot) {
     RecompileResult result;
     static_cast<CompiledShaderArtifact&>(result) = variant.artifact;
@@ -370,6 +384,8 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
     bindings.pushConstantSizeBytes = variant.bindings.pushConstantSizeBytes;
     DescriptorBindingBuilder{}.Populate(bindings, variant.info.info, variant.info.stage, variant.info.userDataBase, snapshot, partialThreads(request), request.context.pixel ? std::span<const std::uint8_t>(request.context.pixel->targetExportMapping) : std::span<const std::uint8_t>{});
     result.bindings = std::move(bindings.bindings);
+    result.specialization = std::move(bindings.specialization);
+    result.specializationId = specializationId(result.variantId, result.specialization);
     result.pushConstants = std::move(bindings.pushConstants);
     result.vertexAttributes.reserve(result.vertexInputs.size());
     for (const auto& input : result.vertexInputs) {

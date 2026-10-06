@@ -16,6 +16,7 @@ struct CompiledBindingLayout {
 };
 
 struct BindingAllocationResult : CompiledBindingLayout {
+    std::vector<PipelineSpecializationConstant> specialization;
     std::vector<DescriptorBinding> bindings;
     std::vector<std::byte> pushConstants;
 };

@@ -3,6 +3,7 @@
 #include "SpirvBackend/SpirvBda.hpp"
 #include "SpirvBackend/SpirvBufferFormat.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvSubgroup.hpp"
+#include "PipelineSpecialization.hpp"
 #include <array>
 #include <vector>
 
@@ -49,13 +50,18 @@ void faultIf(SpirvValueEmitContext& context, const IrValue& instruction, std::ui
 RuntimeDescriptor descriptor(SpirvValueEmitContext& context, const IrValue& instruction) {
     auto& state = context.state;
     const auto* handle = instruction.Argument(0)->Resolve();
-    if (!context.Memory(instruction).gpuDescriptor || handle->Opcode() != IrOpcode::GetBufferResource || handle->ArgumentCount() != 4u) context.Fail(instruction, "requires a runtime four-dword V#");
-    const auto word1 = context.Arg(*handle, 1u);
-    const auto word3 = context.Arg(*handle, 3u);
+    if (handle->Opcode() != IrOpcode::GetBufferResource || handle->ArgumentCount() != 4u) context.Fail(instruction, "requires a runtime four-dword V#");
+    const auto& memory = context.Memory(instruction);
+    const auto first = PipelineSpecialization::BufferBase + memory.resource * PipelineSpecialization::BufferWords;
+    const auto word1 = memory.gpuDescriptor ? context.Arg(*handle, 1u) : state.module.SpecializationConstant(TypeU32(state), first, 0u);
+    const auto word3 = memory.gpuDescriptor ? context.Arg(*handle, 3u) : state.module.SpecializationConstant(TypeU32(state), first + 1u, 0u);
     const auto u32 = TypeU32(state);
-    const auto u64 = TypeScalarU64(state);
-    const auto high = Binary(state, spv::OpShiftLeftLogical, u64, Unary(state, spv::OpUConvert, u64, field(state, word1, 0u, 16u)), BdaConstant(state, 32u));
-    const auto base = Binary(state, spv::OpBitwiseOr, u64, Unary(state, spv::OpUConvert, u64, context.Arg(*handle, 0u)), high);
+    auto base = ConstantU32(state, 0u);
+    if (memory.gpuDescriptor) {
+        const auto u64 = TypeScalarU64(state);
+        const auto high = Binary(state, spv::OpShiftLeftLogical, u64, Unary(state, spv::OpUConvert, u64, field(state, word1, 0u, 16u)), BdaConstant(state, 32u));
+        base = Binary(state, spv::OpBitwiseOr, u64, Unary(state, spv::OpUConvert, u64, context.Arg(*handle, 0u)), high);
+    }
     auto invalid = nonzero(state, field(state, word3, 30u, 2u));
     auto index = ConstantU32(state, 0u);
     if (context.Memory(instruction).kind == ResourceKind::Buffer) {
@@ -67,9 +73,9 @@ RuntimeDescriptor descriptor(SpirvValueEmitContext& context, const IrValue& inst
             invalid = Binary(state, spv::OpLogicalOr, TypeBool(state), invalid, addTid);
         }
     }
-    faultIf(context, instruction, invalid, base, 0u, BdaAbi::FaultReason::InvalidDescriptor);
+    if (memory.gpuDescriptor) faultIf(context, instruction, invalid, base, 0u, BdaAbi::FaultReason::InvalidDescriptor);
     const auto stride = field(state, word1, 16u, 14u);
-    const auto valid = both(state, Unary(state, spv::OpLogicalNot, TypeBool(state), invalid), Binary(state, spv::OpINotEqual, TypeBool(state), base, BdaConstant(state, 0u)));
+    const auto valid = memory.gpuDescriptor ? both(state, Unary(state, spv::OpLogicalNot, TypeBool(state), invalid), Binary(state, spv::OpINotEqual, TypeBool(state), base, BdaConstant(state, 0u))) : nonzero(state, state.module.SpecializationConstant(u32, first + 2u, 0u));
     return {base, context.Arg(*handle, 2u), stride, word3, both(state, nonzero(state, stride), nonzero(state, field(state, word1, 31u, 1u))), index, valid};
 }
 
@@ -103,7 +109,88 @@ RuntimeAddress address(SpirvValueEmitContext& context, const IrValue& instructio
     auto inBounds = Select(state, boolean, equal(state, mode, constant(0u)), structured, indexInBounds);
     inBounds = Select(state, boolean, less(mode, constant(2u)), inBounds, Select(state, boolean, equal(state, mode, constant(2u)), nonzero(state, resource.records), raw));
     inBounds = both(state, resource.valid, both(state, nonzero(state, field(state, resource.word3, 12u, 7u)), inBounds));
+    if (!context.Memory(instruction).gpuDescriptor) return {byte, inBounds};
     return {AddBdaAddress(context, instruction, resource.base, Unary(state, spv::OpUConvert, TypeScalarU64(state), byte), false), inBounds};
+}
+
+MemoryResourceAccess directAccess(SpirvValueEmitContext& context, const IrValue& instruction, bool wide = false) {
+    auto& state = context.state;
+    const auto& memory = context.Memory(instruction);
+    const auto variable = wide ? state.storageBufferU64Variable : state.storageBufferVariable;
+    if (variable == 0u) context.Fail(instruction, "direct buffer descriptor array is missing");
+    const auto element = ResourceForDescriptor(state, DescriptorBindingKind::Buffers, memory.resource);
+    MemoryResourceAccess access;
+    access.kind = memory.kind;
+    access.objectPointer = state.module.AllocateId();
+    state.module.AddFunction(spv::OpAccessChain, wide ? TypeStorageBufferU64Pointer(state) : TypeStorageBufferPointer(state), access.objectPointer, variable, ConstantU32(state, element));
+    access.byteOffset = state.memoryByteOffsets.at(element);
+    access.memoryAccess = memory.coherent ? spv::MemoryAccessVolatileMask : 0u;
+    access.length = state.module.AllocateId();
+    state.module.AddFunction(spv::OpArrayLength, TypeU32(state), access.length, access.objectPointer, 0u);
+    return access;
+}
+
+std::uint32_t readBuffer(SpirvValueEmitContext& context, const IrValue& instruction, std::uint32_t address, std::uint32_t bits) {
+    if (context.Memory(instruction).gpuDescriptor) return EmitBdaRead(context, instruction, address, bits);
+    auto& state = context.state;
+    const auto access = directAccess(context, instruction);
+    const auto byte = EmitAddU32(state, address, access.byteOffset);
+    const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), byte, ConstantU32(state, 2u));
+    const auto shift = Binary(state, spv::OpShiftLeftLogical, TypeU32(state), EmitAndConstant(state, byte, 3u), ConstantU32(state, 3u));
+    const auto load = [&](std::uint32_t word) {
+        return EmitValueOrZeroIfCondition(state, EmitMemoryElementInBounds(state, access, word), [&] {
+            const auto value = state.module.AllocateId();
+            const auto pointer = EmitMemoryElementPointer(state, access, word);
+            if (access.memoryAccess != 0u) state.module.AddFunction(spv::OpLoad, TypeU32(state), value, pointer, access.memoryAccess);
+            else state.module.AddFunction(spv::OpLoad, TypeU32(state), value, pointer);
+            return value;
+        });
+    };
+    const auto low = Binary(state, spv::OpShiftRightLogical, TypeU32(state), load(index), shift);
+    const auto crosses = Binary(state, spv::OpUGreaterThan, TypeBool(state), shift, ConstantU32(state, 32u - bits));
+    const auto high = EmitValueOrZeroIfCondition(state, crosses, [&] {
+        return Binary(state, spv::OpShiftLeftLogical, TypeU32(state), load(EmitAddU32(state, index, ConstantU32(state, 1u))), Binary(state, spv::OpISub, TypeU32(state), ConstantU32(state, 32u), shift));
+    });
+    return EmitAndConstant(state, EmitOrU32(state, low, high), bits == 32u ? 0xffffffffu : (1u << bits) - 1u);
+}
+
+void writeBuffer(SpirvValueEmitContext& context, const IrValue& instruction, std::uint32_t address, std::uint32_t value, std::uint32_t bits = 32u) {
+    if (context.Memory(instruction).gpuDescriptor) {
+        EmitBdaWrite(context, instruction, address, value, bits);
+        return;
+    }
+    auto& state = context.state;
+    const auto access = directAccess(context, instruction);
+    const auto u32 = TypeU32(state);
+    const auto byte = EmitAddU32(state, address, access.byteOffset);
+    const auto index = Binary(state, spv::OpShiftRightLogical, u32, byte, ConstantU32(state, 2u));
+    const auto shift = Binary(state, spv::OpShiftLeftLogical, u32, EmitAndConstant(state, byte, 3u), ConstantU32(state, 3u));
+    const auto mask = ConstantU32(state, bits == 32u ? 0xffffffffu : (1u << bits) - 1u);
+    const auto masked = Binary(state, spv::OpBitwiseAnd, u32, value, mask);
+    const auto update = [&](std::uint32_t word, std::uint32_t wordMask, std::uint32_t replacement) {
+        EmitIfCondition(state, EmitMemoryElementInBounds(state, access, word), [&] {
+            const auto pointer = EmitMemoryElementPointer(state, access, word);
+            AtomicUpdate(state, pointer, access.kind, [&](std::uint32_t old) {
+                return EmitOrU32(state, Binary(state, spv::OpBitwiseAnd, u32, old, Unary(state, spv::OpNot, u32, wordMask)), replacement);
+            });
+        });
+    };
+    const auto unaligned = nonzero(state, shift);
+    if (bits == 32u) {
+        EmitIfCondition(state, both(state, Unary(state, spv::OpLogicalNot, TypeBool(state), unaligned), EmitMemoryElementInBounds(state, access, index)), [&] {
+            const auto pointer = EmitMemoryElementPointer(state, access, index);
+            if (access.memoryAccess != 0u) state.module.AddFunction(spv::OpStore, pointer, value, access.memoryAccess);
+            else state.module.AddFunction(spv::OpStore, pointer, value);
+        });
+    }
+    EmitIfCondition(state, bits == 32u ? unaligned : ConstantBool(state, true), [&] {
+        update(index, Binary(state, spv::OpShiftLeftLogical, u32, mask, shift), Binary(state, spv::OpShiftLeftLogical, u32, masked, shift));
+        const auto crosses = Binary(state, spv::OpUGreaterThan, TypeBool(state), shift, ConstantU32(state, 32u - bits));
+        EmitIfCondition(state, crosses, [&] {
+            const auto remaining = Binary(state, spv::OpISub, u32, ConstantU32(state, 32u), shift);
+            update(EmitAddU32(state, index, ConstantU32(state, 1u)), Binary(state, spv::OpShiftRightLogical, u32, mask, remaining), Binary(state, spv::OpShiftRightLogical, u32, masked, remaining));
+        });
+    });
 }
 
 std::uint32_t composite(SpirvEmitterState& state, std::uint32_t components, const std::array<std::uint32_t, 4>& values) {
@@ -163,17 +250,17 @@ std::uint32_t formatted(SpirvValueEmitContext& context, const IrValue& instructi
                 if (info.packedBitfield) {
                     packed = EmitOrU32(state, packed, Binary(state, spv::OpShiftLeftLogical, u32, EmitAndConstant(state, encoded, (1u << info.componentBits[component]) - 1u), ConstantU32(state, info.componentBitOffset[component])));
                 } else {
-                    EmitBdaWrite(context, instruction, addresses[component].guest, encoded, info.componentBits[component]);
+                    writeBuffer(context, instruction, addresses[component].guest, encoded, info.componentBits[component]);
                 }
             }
-            if (info.packedBitfield) EmitBdaWrite(context, instruction, addresses[0].guest, packed);
+            if (info.packedBitfield) writeBuffer(context, instruction, addresses[0].guest, packed);
         });
         return ConstantU32(state, 0u);
     }
     for (std::uint32_t component = 0; component < info.componentCount; ++component) {
         values[component] = EmitValueOrZeroIfCondition(state, both(state, inBounds, required[component]), [&] {
             const auto bits = info.componentBits[component];
-            auto raw = EmitBdaRead(context, instruction, addresses[component].guest, info.packedBitfield ? 32u : bits);
+            auto raw = readBuffer(context, instruction, addresses[component].guest, info.packedBitfield ? 32u : bits);
             if (bits != 32u) {
                 const auto signedType = IsSignedFormatComponent(info.type);
                 const auto type = signedType ? TypeI32(state) : u32;
@@ -205,7 +292,7 @@ std::uint32_t formattedDispatch(SpirvValueEmitContext& context, const IrValue& i
         if (info.type == SpirvFormatComponentType::Unknown) context.Fail(instruction, "typed buffer instruction has an invalid format");
         return formatted(context, instruction, resource, info, components, store);
     }
-    if (!store) {
+    if (!store && memory.gpuDescriptor) {
         auto invalid = ConstantBool(state, false);
         for (std::uint32_t component = 0; component < components; ++component) {
             const auto selector = field(state, resource.word3, component * 3u, 3u);
@@ -214,7 +301,7 @@ std::uint32_t formattedDispatch(SpirvValueEmitContext& context, const IrValue& i
         faultIf(context, instruction, invalid, resource.base, 0u, BdaAbi::FaultReason::InvalidDescriptor);
     }
     const auto* word = instruction.Argument(0)->Resolve()->Argument(3)->Resolve();
-    if (word->HasImmediate()) {
+    if (memory.gpuDescriptor && word->HasImmediate()) {
         const auto format = static_cast<IrBufferFormat>((word->ImmediateU32() >> 12u) & 0x7fu);
         if (format == IrBufferFormat::Invalid) context.Fail(instruction, "formatted buffer instruction has an invalid constant format");
         return formatted(context, instruction, resource, GetFormatInfo(format), components, store);
@@ -244,7 +331,7 @@ std::uint32_t formattedDispatch(SpirvValueEmitContext& context, const IrValue& i
         phi.insert(phi.end(), {value, exit});
     }
     EmitLabel(state, invalid);
-    RecordBdaFault(state, resource.base, ConstantU32(state, 0u), ConstantU32(state, instruction.Flags<MemoryFlags>().pc), BdaAbi::FaultReason::InvalidDescriptor);
+    if (memory.gpuDescriptor) RecordBdaFault(state, resource.base, ConstantU32(state, 0u), ConstantU32(state, instruction.Flags<MemoryFlags>().pc), BdaAbi::FaultReason::InvalidDescriptor);
     const auto zero = store || components == 1u ? ConstantU32(state, 0u) : ConstantU32CompositeZero(state, components);
     const auto invalidExit = state.module.AllocateId();
     state.module.AddFunction(spv::OpBranch, invalidExit);
@@ -254,7 +341,7 @@ std::uint32_t formattedDispatch(SpirvValueEmitContext& context, const IrValue& i
     EmitLabel(state, merge);
     state.module.AddFunction(phi);
     const auto unsupported = Binary(state, spv::OpLogicalOr, TypeBool(state), equal(state, format, ConstantU32(state, 0u)), Binary(state, spv::OpUGreaterThan, TypeBool(state), format, ConstantU32(state, count)));
-    StopBdaInvocationIf(state, unsupported);
+    if (memory.gpuDescriptor) StopBdaInvocationIf(state, unsupported);
     return result;
 }
 
@@ -271,7 +358,7 @@ std::uint32_t EmitRuntimeBufferLoad(SpirvValueEmitContext& context, const IrValu
         std::array<std::uint32_t, 4> values{};
         for (std::uint32_t component = 0; component < components; ++component) {
             const auto access = address(context, instruction, resource, component * 4u, memory.dataBits / 8u);
-            values[component] = EmitValueOrZeroIfCondition(state, access.inBounds, [&] { return EmitBdaRead(context, instruction, access.guest, memory.dataBits); });
+            values[component] = EmitValueOrZeroIfCondition(state, access.inBounds, [&] { return readBuffer(context, instruction, access.guest, memory.dataBits); });
         }
         return composite(state, components, values);
     });
@@ -289,7 +376,7 @@ void EmitRuntimeBufferStore(SpirvValueEmitContext& context, const IrValue& instr
         const auto values = storeValues(context, instruction, components);
         for (std::uint32_t component = 0; component < components; ++component) {
             const auto access = address(context, instruction, resource, component * 4u, memory.dataBits / 8u);
-            EmitIfCondition(state, access.inBounds, [&] { EmitBdaWrite(context, instruction, access.guest, values[component], memory.dataBits); });
+            EmitIfCondition(state, access.inBounds, [&] { writeBuffer(context, instruction, access.guest, values[component], memory.dataBits); });
         }
     });
 }
@@ -297,6 +384,10 @@ void EmitRuntimeBufferStore(SpirvValueEmitContext& context, const IrValue& instr
 std::uint32_t EmitRuntimeScalarBufferLoad(SpirvValueEmitContext& context, const IrValue& instruction) {
     auto& state = context.state;
     const auto resource = descriptor(context, instruction);
+    if (!context.Memory(instruction).gpuDescriptor) {
+        const auto byte = EmitAndConstant(state, EmitAddU32(state, context.Arg(instruction, 1u), ConstantU32(state, context.Memory(instruction).offset)), ~3u);
+        return EmitValueOrZeroIfCondition(state, resource.valid, [&] { return readBuffer(context, instruction, byte, 32u); });
+    }
     const auto u64 = TypeScalarU64(state);
     const auto size = Select(state, u64, equal(state, resource.stride, ConstantU32(state, 0u)), Unary(state, spv::OpUConvert, u64, resource.records), Binary(state, spv::OpIMul, u64, Unary(state, spv::OpUConvert, u64, resource.stride), Unary(state, spv::OpUConvert, u64, resource.records)));
     const auto address = EmitAddU32(state, context.Arg(instruction, 1u), ConstantU32(state, context.Memory(instruction).offset));
@@ -304,13 +395,13 @@ std::uint32_t EmitRuntimeScalarBufferLoad(SpirvValueEmitContext& context, const 
     const auto byte = EmitAndConstant(state, address, ~3u);
     const auto offset = Unary(state, spv::OpUConvert, u64, byte);
     const auto inBounds = both(state, noCarry, both(state, resource.valid, Binary(state, spv::OpULessThanEqual, TypeBool(state), Binary(state, spv::OpIAdd, u64, offset, BdaConstant(state, 4u)), size)));
-    return EmitValueOrZeroIfCondition(state, inBounds, [&] { return EmitBdaRead(context, instruction, AddBdaAddress(context, instruction, resource.base, offset, false), 32u); });
+    return EmitValueOrZeroIfCondition(state, inBounds, [&] { return readBuffer(context, instruction, AddBdaAddress(context, instruction, resource.base, offset, false), 32u); });
 }
 
 std::uint32_t EmitRuntimeBufferAtomic(SpirvValueEmitContext& context, const IrValue& instruction, std::uint32_t bits, std::uint32_t active, const std::function<std::uint32_t(std::uint32_t)>& operation) {
     auto& state = context.state;
     if (bits != 32u && bits != 64u) context.Fail(instruction, "unsupported runtime buffer atomic width");
-    if (state.bdaAtomicPointerFunction == 0u || state.bdaNoteWriteFunction == 0u) context.Fail(instruction, "BDA atomic functions are missing");
+    if (context.Memory(instruction).gpuDescriptor && (state.bdaAtomicPointerFunction == 0u || state.bdaNoteWriteFunction == 0u)) context.Fail(instruction, "BDA atomic functions are missing");
     const auto type = bits == 64u ? TypeU64(state) : TypeU32(state);
     const auto scalar = bits == 64u ? TypeScalarU64(state) : TypeU32(state);
     const auto zero = bits == 64u ? ConstantU64(state, 0u) : ConstantU32(state, 0u);
@@ -318,6 +409,15 @@ std::uint32_t EmitRuntimeBufferAtomic(SpirvValueEmitContext& context, const IrVa
         const auto resource = descriptor(context, instruction);
         const auto access = address(context, instruction, resource, 0u, bits / 8u);
         return EmitValueOrDefaultIfCondition(state, access.inBounds, type, zero, [&] {
+            if (!context.Memory(instruction).gpuDescriptor) {
+                const auto storage = directAccess(context, instruction, bits == 64u);
+                const auto byte = EmitAddU32(state, access.guest, storage.byteOffset);
+                const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), byte, ConstantU32(state, bits == 64u ? 3u : 2u));
+                return EmitValueOrDefaultIfCondition(state, EmitMemoryElementInBounds(state, storage, index), type, zero, [&] {
+                    const auto pointer = EmitStorageBufferElementPointer(state, storage, index, bits == 64u ? TypeStorageBufferU64ElementPointer(state) : TypeStorageBufferElementPointer(state));
+                    return operation(pointer);
+                });
+            }
             const auto unaligned = Binary(state, spv::OpINotEqual, TypeBool(state), Binary(state, spv::OpBitwiseAnd, TypeScalarU64(state), access.guest, BdaConstant(state, bits / 8u - 1u)), BdaConstant(state, 0u));
             faultIf(context, instruction, unaligned, access.guest, bits / 8u, BdaAbi::FaultReason::Unaligned);
             return EmitValueOrDefaultIfCondition(state, Unary(state, spv::OpLogicalNot, TypeBool(state), unaligned), type, zero, [&] {

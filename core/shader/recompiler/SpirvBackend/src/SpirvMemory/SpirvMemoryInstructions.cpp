@@ -284,7 +284,6 @@ const MemoryInfo& BufferMemory(SpirvValueEmitContext& ctx, const IrValue& inst) 
     if (mem.kind != ResourceKind::Buffer) {
         ctx.Fail(inst, "must access a buffer resource");
     }
-    if (!mem.gpuDescriptor) ctx.Fail(inst, "buffer operation has no runtime V#");
     return mem;
 }
 
@@ -433,7 +432,7 @@ std::uint32_t EmitAtomicOperation(SpirvValueEmitContext& ctx, const IrValue& ins
 
 template<typename TOperation>
 std::uint32_t EmitAtomicAccess(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem, TOperation&& operation) {
-    if (mem.gpuDescriptor) return EmitRuntimeBufferAtomic(ctx, inst, 32u, ActiveArgument(ctx, inst), operation);
+    if (mem.kind == ResourceKind::Buffer) return EmitRuntimeBufferAtomic(ctx, inst, 32u, ActiveArgument(ctx, inst), operation);
     auto& state = ctx.state;
     return EmitValueOrZeroIfCondition(state, ActiveArgument(ctx, inst), [&]() {
         const auto access = PrepareMemoryElement(ctx, mem, DwordIndex(ctx, inst, mem));
@@ -536,7 +535,7 @@ std::uint32_t Atomic32(SpirvValueEmitContext& ctx, const IrValue& inst, const Me
             return current;
         });
     };
-    if (mem.gpuDescriptor) return EmitRuntimeBufferAtomic(ctx, inst, 32u, active, apply);
+    if (mem.kind == ResourceKind::Buffer) return EmitRuntimeBufferAtomic(ctx, inst, 32u, active, apply);
     return EmitValueOrZeroIfCondition(state, active, [&] {
         const auto access = PrepareMemoryElement(ctx, mem, DwordIndex(ctx, inst, mem));
         return EmitValueOrZeroIfCondition(state, EmitMemoryElementInBounds(state, access.resource, access.index), [&] { return apply(EmitMemoryElementPointer(state, access.resource, access.index)); });

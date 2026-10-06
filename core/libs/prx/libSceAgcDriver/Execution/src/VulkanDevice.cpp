@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineSpecialization.hpp"
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
 #include "BdaAbi.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
@@ -3050,7 +3051,7 @@ std::shared_ptr<PreparedDispatch> VulkanDevice::PrepareDispatch(const ShaderReco
         prepared->phaseMs[which] += std::chrono::duration<double, std::milli>(now - phaseStart).count();
         phaseStart = now;
     };
-    if (ResourceCacheEnabled() && shader.variantId != 0) {
+    if (ResourceCacheEnabled() && shader.PipelineVariantId() != 0) {
         prepared->key = DispatchContentKey(compute, context.device);
         phase(PreparedDispatch::PrepareKey);
         cached = state->resourceCache.Find(prepared->key);
@@ -3347,7 +3348,7 @@ VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::Rec
     }
     // Pipelines are shared by dispatches of one compiled variant; descriptor set layouts built from the
     // same bindings are compatible, so the pipeline layout of the first dispatch serves them all.
-    const std::uint64_t pipelineKey = shader.variantId != 0 ? (shader.variantId << 1u) | (pushStages != 0 ? 1u : 0u) : 0u;
+    const std::uint64_t pipelineKey = shader.PipelineVariantId() != 0 ? (shader.PipelineVariantId() << 1u) | (pushStages != 0 ? 1u : 0u) : 0u;
     std::shared_ptr<ComputePipelineObjects> objects;
     if (pipelineKey != 0) {
         std::lock_guard pipelines(state->computePipelinesMutex);
@@ -3363,7 +3364,7 @@ VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::Rec
     const auto lookupsBefore = Graphics::DeviceProcLookups();
     std::shared_ptr<Graphics::ShaderResources> resources;
     ResourceCache::Key contentKey;
-    const bool cacheable = ResourceCacheEnabled() && shader.variantId != 0;
+    const bool cacheable = ResourceCacheEnabled() && shader.PipelineVariantId() != 0;
     // The object came from the resource cache: a compute template whose data buffers take this
     // dispatch's words at the record (ShaderResources::RefreshData).
     bool fromCache = false;
@@ -3516,6 +3517,8 @@ VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::Rec
         pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         pipelineInfo.stage.module = objects->module;
         pipelineInfo.stage.pName = "main";
+        const Graphics::PipelineSpecialization specialization(shader);
+        pipelineInfo.stage.pSpecializationInfo = specialization.Info();
         VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT requiredSubgroup{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT};
         requiredSubgroup.requiredSubgroupSize = shader.hostSubgroupSize;
         if (state->computeWave32 && shader.hostSubgroupSize == 32u) pipelineInfo.stage.pNext = &requiredSubgroup;
@@ -3564,7 +3567,7 @@ VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::Rec
             static auto lastReport = std::chrono::steady_clock::now();
             const auto now = std::chrono::steady_clock::now();
             const auto ms = std::chrono::duration<double, std::milli>(now - syncStart).count();
-            auto& waits = byProgram[programAddress != 0 ? programAddress : shader.variantId];
+            auto& waits = byProgram[programAddress != 0 ? programAddress : shader.PipelineVariantId()];
             ++waits.count;
             waits.ms += ms;
             ++syncs;
@@ -3662,7 +3665,7 @@ RecipeOutcome VulkanDevice::DispatchRecipe(const ShaderRecompiler::RecompileResu
             return RecipeOutcome::Rebuild;
         }
         std::shared_ptr<ComputePipelineObjects> mapped;
-        const auto pipelineKey = (shader.variantId << 1u) | (recipe.pushes ? 1u : 0u);
+        const auto pipelineKey = (shader.PipelineVariantId() << 1u) | (recipe.pushes ? 1u : 0u);
         {
             std::lock_guard pipelines(state->computePipelinesMutex);
             if (const auto found = state->computePipelines.find(pipelineKey); found != state->computePipelines.end()) mapped = found->second;

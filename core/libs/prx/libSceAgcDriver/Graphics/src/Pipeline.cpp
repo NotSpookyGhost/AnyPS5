@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineSpecialization.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include <algorithm>
 #include <array>
@@ -117,6 +118,8 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
     Require(pushStages == 0 || context.limits.maxPushConstantsSize >= PipelinePushConstantBytes, "graphics push constant range exceeds device limit");
     try {
         std::vector<VkPipelineShaderStageCreateInfo> stages(shaders.size());
+        std::vector<PipelineSpecialization> specializations;
+        specializations.reserve(shaders.size());
         for (std::uint32_t i = 0; i < shaders.size(); ++i) {
             const auto& shader = *shaders[i].program;
             VkShaderModuleCreateInfo module{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -128,6 +131,8 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
             stages[i].stage = stage;
             stages[i].module = _modules[i];
             stages[i].pName = "main";
+            specializations.emplace_back(shader);
+            stages[i].pSpecializationInfo = specializations.back().Info();
         }
         // A descriptor set layout with the same bindings as this one is compatible with the pipeline
         // layout, so later draws bind their own ShaderResources' set under it.
@@ -367,9 +372,9 @@ std::vector<std::byte> pipelineKey(const Context& context, const State& state, c
     for (const auto& shader : shaders) {
         Require(shader.program != nullptr, "missing compiled shader");
         const bool generated = state.rectList && (shader.stage == Stage::TessellationControl || shader.stage == Stage::TessellationEvaluation);
-        if (!generated && shader.program->variantId == 0) return {};
+        if (!generated && shader.program->PipelineVariantId() == 0) return {};
         append(key, shader.stage);
-        append(key, generated ? std::uint64_t{0} : shader.program->variantId);
+        append(key, generated ? std::uint64_t{0} : shader.program->PipelineVariantId());
         // Where the stage's push constants sit in the block (AssemblePushConstants).
         append(key, shader.pushConstantOffset);
     }

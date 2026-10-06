@@ -1,5 +1,6 @@
 #include "SpirvBackend/SpirvImageEmitter.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
+#include "PipelineSpecialization.hpp"
 #include "SpirvBackend/SpirvBda.hpp"
 #include "SpirvBackend/SpirvBufferFormat.hpp"
 #include "SpirvBackend/SpirvEmitterInstructions.hpp"
@@ -56,6 +57,7 @@ std::uint32_t RuntimeImageDword(SpirvEmitterState& state, std::uint32_t resource
 }
 
 std::uint32_t RuntimeImageSwizzle(SpirvEmitterState& state, std::uint32_t resource, std::uint32_t component) {
+    if (state.program.Info().images.at(resource).indirectRoot == ImageResource::NoIndirectImage) return state.module.SpecializationConstant(TypeU32(state), PipelineSpecialization::ImageBase + resource * PipelineSpecialization::ImageWords + 1u + component, component + 4u);
     const auto descriptor = RuntimeImageDword(state, resource, offsetof(RuntimeAbi::ResourceMetadata, descriptor) / sizeof(std::uint32_t) + 3u);
     return Binary(state, spv::OpBitwiseAnd, TypeU32(state), Binary(state, spv::OpShiftRightLogical, TypeU32(state), descriptor, ConstantU32(state, component * 3u)), ConstantU32(state, 7u));
 }
@@ -1390,7 +1392,7 @@ void EmitImage(SpirvValueEmitContext& ctx, const IrValue& inst) {
         state.runtimeImageMetadata = 0u;
         return;
     }
-    const auto selector = Binary(state, spv::OpShiftRightLogical, TypeU32(state), RuntimeImageDword(state, memory.resource, offsetof(RuntimeAbi::ResourceMetadata, flags) / sizeof(std::uint32_t)), ConstantU32(state, 1u));
+    const auto selector = base.indirectRoot == ImageResource::NoIndirectImage ? state.module.SpecializationConstant(TypeU32(state), PipelineSpecialization::ImageBase + memory.resource * PipelineSpecialization::ImageWords, 0u) : Binary(state, spv::OpShiftRightLogical, TypeU32(state), RuntimeImageDword(state, memory.resource, offsetof(RuntimeAbi::ResourceMetadata, flags) / sizeof(std::uint32_t)), ConstantU32(state, 1u));
     const bool returnsValue = inst.Opcode() != IrOpcode::ImageWrite;
     const auto resultId = returnsValue ? ctx.Result(inst) : 0u;
     ctx.definitions.erase(&inst);
