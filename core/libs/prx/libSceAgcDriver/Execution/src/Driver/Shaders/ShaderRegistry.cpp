@@ -105,6 +105,20 @@ ShaderRecompiler::RectListShaders PreparedRectangle(const ShaderSnapshot& snapsh
     }
     throw std::runtime_error("AGC driver: prepared rectangle artifacts are missing");
 }
+
+ShaderRecompiler::PreparedShaderInvocation InvocationFor(const ShaderSnapshot& snapshot, std::size_t codeOffset, std::uint64_t deviceSerial, const ShaderRecompiler::RecompileRequest& request) {
+    require(codeOffset < snapshot.code.size(), "prepared shader code offset is outside the snapshot");
+    const auto code = std::span(snapshot.code).subspan(codeOffset);
+    require(request.shader.code.data() == code.data() && request.shader.code.size() == code.size(), "prepared invocation does not refer to registered code");
+    auto invocationRequest = request;
+    std::lock_guard lock(snapshot.prepared->mutex);
+    for (const auto& entry : snapshot.prepared->entries) {
+        if (entry.codeOffset != codeOffset || entry.deviceSerial != deviceSerial) continue;
+        invocationRequest.shader.code = ShaderRecompiler::GetPreparedCode(*entry.handle);
+        if (auto invocation = ShaderRecompiler::PreparedShaderInvocation::TryCreate(invocationRequest, entry.handle)) return std::move(*invocation);
+    }
+    throw std::runtime_error("AGC driver: prepared shader artifact is missing for the requested static ABI");
+}
 namespace {
 
 template<typename TValue>

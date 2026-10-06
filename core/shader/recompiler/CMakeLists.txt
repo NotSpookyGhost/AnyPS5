@@ -217,6 +217,8 @@ function(add_shader_recompiler target runtimeTarget)
             RecompileCacheKey::ContextHash
             RecompileResult
             PrepareShader
+            GetPreparedCode
+            PreparedShaderInvocation::TryCreate
             MatchesPreparedShader
             GetPreparedArtifact
             MaterializeShader

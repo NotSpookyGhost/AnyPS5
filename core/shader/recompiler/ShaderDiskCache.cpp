@@ -2,6 +2,7 @@
 #include "CacheKey.hpp"
 #include "ShaderCacheDirectory.hpp"
 #include "ThreadOwned.hpp"
+#include "Optimization/ResourceMaterializer.hpp"
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -70,8 +71,8 @@ static_assert(sizeof(DescriptorBinding) == 448, "DescriptorBinding changed: upda
 static_assert(sizeof(VertexAttribute) == 28, "VertexAttribute changed: update the attribute encoder");
 static_assert(sizeof(VertexInput) == 12, "VertexInput changed: update the vertex input encoder");
 static_assert(sizeof(FragmentParameter) == 12, "FragmentParameter changed: update the parameter encoder");
-static_assert(sizeof(CompiledShaderInfo) == 304, "CompiledShaderInfo changed: update the info encoder");
-static_assert(sizeof(ShaderInfo) == 200, "ShaderInfo changed: update the info encoder");
+static_assert(sizeof(CompiledShaderInfo) == 328, "CompiledShaderInfo changed: update the info encoder");
+static_assert(sizeof(ShaderInfo) == 224, "ShaderInfo changed: update the info encoder");
 static_assert(sizeof(BufferResource) == 24, "BufferResource changed: update the info encoder");
 static_assert(sizeof(ImageResource) == 96, "ImageResource changed: update the info encoder");
 static_assert(sizeof(SamplerResource) == 12, "SamplerResource changed: update the info encoder");
@@ -440,6 +441,7 @@ void encodeInfo(Writer& writer, const CompiledShaderInfo& compiled) {
         out.Value(image.indirectSearchIterations);
         out.Values(std::span<const std::uint32_t>(image.indirectResources));
     });
+    writer.Value(!info.runtimeImageModes.empty());
     writer.List(info.samplers, [](Writer& out, const SamplerResource& sampler) {
         out.Value(sampler.source);
         out.Value(sampler.firstUsePc);
@@ -531,6 +533,9 @@ void decodeInfo(Reader& reader, CompiledShaderInfo& compiled) {
         in.Value(image.indirectSearchIterations);
         in.Values(image.indirectResources);
     });
+    bool preparedImageModes = false;
+    reader.Value(preparedImageModes);
+    if (preparedImageModes) ResourceMaterializer::PrepareImageModes(info);
     reader.List(info.samplers, 11, [](Reader& in, SamplerResource& sampler) {
         in.Value(sampler.source);
         in.Value(sampler.firstUsePc);

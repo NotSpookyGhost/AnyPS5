@@ -17,7 +17,8 @@ public:
     static std::uint32_t EmulatedCompareState(const ShaderInfo& info, const ResourceSnapshot& snapshot, std::uint32_t index);
     void ApplyStaticInterface(IrProgram& program) const;
     static std::vector<ImageResource> RuntimeImageModes(const ImageResource& image);
-    static std::uint32_t RuntimeImageMode(const ImageResource& image, const DescriptorValue& descriptor);
+    static std::uint32_t RuntimeImageMode(const ImageResource& image, const DescriptorValue& descriptor, std::span<const ImageResource> modes);
+    static void PrepareImageModes(ShaderInfo& info);
     [[nodiscard]] IrResourcePlan ExtractPlan(const IrProgram& program) const;
     void Materialize(const IrResourcePlan& program, const SrtRuntime& runtime, ResourceSnapshot& snapshot) const;
     static std::uint64_t SpecializationNanoseconds();

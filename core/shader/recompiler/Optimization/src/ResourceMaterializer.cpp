@@ -375,7 +375,7 @@ void resolveTableImage(const IrResourcePlan& plan, std::uint32_t imageIndex, con
         if (!validImageDescriptor(candidate, image.r128)) throw std::runtime_error("bindless image table contains an invalid descriptor");
         const auto decoded = decodeImageDescriptor(candidate, image, plan.srgbDecodeFormats);
         if (decoded.fmask) throw std::runtime_error("bindless FMASK images are unsupported");
-        static_cast<void>(ResourceMaterializer::RuntimeImageMode(image, candidate));
+        static_cast<void>(ResourceMaterializer::RuntimeImageMode(image, candidate, plan.info.runtimeImageModes.at(imageIndex)));
         valid[i] = 1u;
     }
     resolution.mapping.clear();
@@ -545,7 +545,7 @@ void materializeTables(const IrResourcePlan& plan, ResourceSnapshot& snapshot, c
     if (snapshot.flattenedSrt.size() != plan.srtReads.size()) throw std::runtime_error("runtime SRT size differs from the static interface");
     for (std::uint32_t i = 0u; i < plan.info.images.size(); ++i) {
         const auto& image = plan.info.images[i];
-        static_cast<void>(ResourceMaterializer::RuntimeImageMode(image, snapshot.images.at(i)));
+        static_cast<void>(ResourceMaterializer::RuntimeImageMode(image, snapshot.images.at(i), plan.info.runtimeImageModes.at(i)));
         const auto& table = tables.at(i);
         if (!plan.descriptorSources.at(image.source).indirectImage.has_value()) {
             if (!table.slots.empty()) throw std::runtime_error("direct image has runtime table slots");
@@ -622,9 +622,9 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
     return modes;
 }
 
-std::uint32_t ResourceMaterializer::RuntimeImageMode(const ImageResource& image, const DescriptorValue& descriptor) {
+std::uint32_t ResourceMaterializer::RuntimeImageMode(const ImageResource& image, const DescriptorValue& descriptor, std::span<const ImageResource> modes) {
     if (descriptor.dwordCount != 8u) throw std::runtime_error("runtime image descriptor must contain eight dwords");
-    const auto modes = RuntimeImageModes(image);
+    if (modes.empty()) throw std::runtime_error("prepared runtime image modes are missing");
     if (nullImageDescriptor(descriptor)) return 0u;
     const auto decoded = decodeImageDescriptor(descriptor, image);
     if (image.packed && decoded.packedFormat != IrBufferFormat::Invalid) {
@@ -688,6 +688,13 @@ void ResourceMaterializer::ApplyStaticInterface(IrProgram& program) const {
         sampler.depthCompare = sampler.depthCompare || images[pair.image].depthCompare;
     }
     resources.info.images = std::move(images);
+    PrepareImageModes(resources.info);
+}
+
+void ResourceMaterializer::PrepareImageModes(ShaderInfo& info) {
+    info.runtimeImageModes.clear();
+    info.runtimeImageModes.reserve(info.images.size());
+    for (const auto& image : info.images) info.runtimeImageModes.push_back(RuntimeImageModes(image));
 }
 
 namespace {
@@ -772,6 +779,7 @@ IrResourcePlan ResourceMaterializer::ExtractPlan(const IrProgram& program) const
     plan.srtPlanComplete = source.srtPlanComplete;
     plan.resourceTrackingComplete = source.resourceTrackingComplete;
     plan.info = source.info;
+    PrepareImageModes(plan.info);
     plan.uniformFill = source.uniformFill;
     ownPlanValues(plan);
     const auto addSource = [&plan](std::uint32_t index) {

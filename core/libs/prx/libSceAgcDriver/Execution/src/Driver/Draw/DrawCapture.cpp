@@ -22,13 +22,13 @@ ShaderRecompiler::RecompileResult Driver::materializeDrawStage(std::size_t i, st
         ShaderRecompiler::GraphicsCompileContext{program.firstUserSgpr, linked, graphics.stages.mesh, graphics.stages.tessellation, {drawParameters.indexAddress, drawParameters.indexCount, drawParameters.indexSize, drawParameters.instanceCount}}
     };
     const auto waitedBefore = traceCapSync() || profile ? Graphics::Recorder::ThreadWaitedMs() : 0.0;
-    const auto handle = SourceHandleFor(*program.snapshot, program.codeOffset, localDevice->Serial(), request);
+    const auto invocation = InvocationFor(*program.snapshot, program.codeOffset, localDevice->Serial(), request);
     auto& stageCapture = stageCaptures[i];
     stageCapture.forgetSerial = GuestMemory::ForgetSerial();
     stageCapture.pushOffset = pushOffset;
     const auto capture = [&] {
         const SampledReadScope sampling(evidenceReads);
-        return shaderMemory.Capture(request, handle.get());
+        return shaderMemory.Capture(invocation);
     }();
 
     stageCapture.regions = shaderMemory.TakeRecentRegions();
@@ -71,7 +71,7 @@ ShaderRecompiler::RecompileResult Driver::materializeDrawStage(std::size_t i, st
 
     phaseTiming.Phase(DrawRowCapture);
 
-    stageCapture.compiled = ShaderRecompiler::MaterializeShader(request, *capture, *handle);
+    stageCapture.compiled = invocation.Materialize(*capture);
     ShaderRecompiler::RecompileResult result = *stageCapture.compiled;
     phaseTiming.Phase(DrawRowRecompile);
     return result;

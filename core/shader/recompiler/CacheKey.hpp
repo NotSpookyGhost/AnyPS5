@@ -26,17 +26,14 @@ public:
         } else {
             append(key, request.shader.code);
         }
-        append(key, request.context.waveSize);
-        append(key, request.context.userDataBaseRegister);
-        append(key, request.context.userData.size());
-        append(key, request.context.compute);
-        append(key, request.context.pixel);
-        append(key, request.context.vertex);
-        appendMesh(key, request);
-        append(key, request.target);
-        append(key, DebugProbeActive());
-        append(key, RayTracingStrict());
-        append(key, RayTracingMiss());
+        appendInterface(key, request);
+    }
+
+    static void BuildInterface(const RecompileRequest& request, std::vector<std::uint64_t>& key) {
+        key.clear();
+        append(key, RuntimeAbi::Version);
+        append(key, request.shader.stage);
+        appendInterface(key, request);
     }
 
     // A hash over every field Build appends except the code, the target and the probe flag: the
@@ -77,6 +74,20 @@ public:
     }
 
 private:
+    static void appendInterface(std::vector<std::uint64_t>& key, const RecompileRequest& request) {
+        append(key, request.context.waveSize);
+        append(key, request.context.userDataBaseRegister);
+        append(key, request.context.userData.size());
+        append(key, request.context.compute);
+        append(key, request.context.pixel);
+        append(key, request.context.vertex);
+        appendMesh(key, request);
+        append(key, request.target);
+        append(key, DebugProbeActive());
+        append(key, RayTracingStrict());
+        append(key, RayTracingMiss());
+    }
+
     static void appendMesh(std::vector<std::uint64_t>& key, const RecompileRequest& request) {
         if (request.shader.stage != ShaderStage::Mesh) return;
         const auto* mesh = request.graphics && request.graphics->mesh ? &*request.graphics->mesh : nullptr;

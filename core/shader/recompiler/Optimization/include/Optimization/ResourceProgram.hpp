@@ -40,6 +40,19 @@ struct SourceHandle {
     std::shared_ptr<const CompiledVariant> artifact;
     std::vector<std::uint64_t> staticKey;
 };
+class PreparedShaderInvocation {
+public:
+    static std::optional<PreparedShaderInvocation> TryCreate(const RecompileRequest& request, const std::shared_ptr<const SourceHandle>& handle);
+    const RecompileRequest& Request() const { return request; }
+    std::shared_ptr<const ResourceCapture> Capture(const SrtRuntime& runtime) const;
+    std::shared_ptr<const RecompileResult> Materialize(const ResourceCapture& capture) const;
+
+private:
+    PreparedShaderInvocation(const RecompileRequest& request, const std::shared_ptr<const SourceHandle>& handle);
+    RecompileRequest request;
+    std::shared_ptr<const SourceHandle> handle;
+};
+[[nodiscard]] std::span<const std::uint32_t> GetPreparedCode(const SourceHandle& handle);
 [[nodiscard]] std::shared_ptr<const SourceHandle> PrepareShader(const RecompileRequest& request);
 [[nodiscard]] bool MatchesPreparedShader(const RecompileRequest& request, const SourceHandle& handle);
 [[nodiscard]] const CompiledShaderArtifact& GetPreparedArtifact(const SourceHandle& handle);

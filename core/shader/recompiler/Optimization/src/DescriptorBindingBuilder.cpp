@@ -227,7 +227,7 @@ std::uint32_t ImageSamplerMask(const ShaderInfo& info, const std::vector<std::ui
     return mask;
 }
 
-std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, const ShaderInfo& info, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads) {
+std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, const ShaderInfo& info, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::span<const std::uint32_t> imageModes) {
     RuntimeAbi::ShaderData data{};
     data.version = RuntimeAbi::Version;
     if (snapshot.images.size() > data.images.size() || snapshot.samplers.size() > data.samplers.size()) fail("runtime resource metadata capacity exceeded");
@@ -257,9 +257,9 @@ std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, co
             const auto& descriptor = image ? snapshot.images.at(resource) : snapshot.samplers.at(resource);
             std::uint32_t modeIndex = 0u;
             if (image) {
-                const auto& base = info.images.at(resource);
-                modeIndex = ResourceMaterializer::RuntimeImageMode(base, descriptor);
-                const auto mode = ResourceMaterializer::RuntimeImageModes(base).at(modeIndex);
+                if (resource >= imageModes.size()) fail("runtime image index exceeds the static capacity");
+                modeIndex = imageModes[resource];
+                const auto& mode = info.runtimeImageModes.at(resource).at(modeIndex);
                 if (DescriptorBindingForImage(mode) != binding.kind) continue;
             }
             if (metadata.elementCount == 0u) {
@@ -295,7 +295,10 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
 
 void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads) const {
     const IrBindingLayout& layout = allocation.layout;
-    const std::vector<std::uint32_t> shaderData = ShaderDataDwordsFor(layout, info, userDataBase, snapshot, partialThreads);
+    if (info.images.size() > ShaderInfo::MaxImages) fail("runtime image count exceeds the static capacity");
+    std::array<std::uint32_t, ShaderInfo::MaxImages> imageModes{};
+    for (std::size_t index = 0; index < info.images.size(); ++index) imageModes[index] = ResourceMaterializer::RuntimeImageMode(info.images[index], snapshot.images.at(index), info.runtimeImageModes.at(index));
+    const std::vector<std::uint32_t> shaderData = ShaderDataDwordsFor(layout, info, userDataBase, snapshot, partialThreads, imageModes);
     const UnnormalizedProof unnormalized = ProveUnnormalized(info, snapshot);
     const std::vector<std::uint32_t> samplerElements = SamplerElements(layout, info);
 
@@ -327,7 +330,7 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
             }
             break;
         case DescriptorRole::GuestImages: {
-            const auto modes = ResourceMaterializer::RuntimeImageModes(info.images.at(logical.resources.front()));
+            const auto& modes = info.runtimeImageModes.at(logical.resources.front());
             const auto shape = std::ranges::find_if(modes, [&](const ImageResource& mode) { return DescriptorBindingForImage(mode) == logical.kind; });
             if (shape == modes.end()) fail("runtime image heap has no static image type");
             physical.imageShape = ImageShapeForResource(*shape);
@@ -336,7 +339,7 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
             for (const std::uint32_t resource : logical.resources) {
                 const auto& image = info.images.at(resource);
                 const auto& descriptor = snapshot.images.at(resource);
-                const auto mode = ResourceMaterializer::RuntimeImageModes(image).at(ResourceMaterializer::RuntimeImageMode(image, descriptor));
+                const auto& mode = info.runtimeImageModes.at(resource).at(imageModes[resource]);
                 mip = resource == previous ? mip + 1u : 0u;
                 previous = resource;
                 const auto firstMip = (descriptor.dwords[3] >> 12u) & 0xfu;

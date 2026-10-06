@@ -49,6 +49,27 @@ void Run(AgcDriver::VulkanDevice& device) {
         device.Dispatch(*result, 1, 1, 1);
     }
     device.WaitIdle();
+    auto registeredRequest = request;
+    registeredRequest.shader.code = snapshot.code;
+    registeredRequest.useCache = true;
+    const auto invocation = AgcDriver::DriverDetail::InvocationFor(snapshot, 0, device.Serial(), registeredRequest);
+    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 0, device.Serial(), request)); }, "does not refer to registered code");
+    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 1, device.Serial(), registeredRequest)); }, "outside the snapshot");
+    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 0, device.Serial() + 1, registeredRequest)); }, "artifact is missing");
+    registeredRequest.context.compute->numThreads[0] = 2;
+    ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 0, device.Serial(), registeredRequest)); }, "artifact is missing");
+    ShaderRecompiler::SrtRuntime preparedRuntime{};
+    preparedRuntime.userData = users;
+    const auto preparedCapture = invocation.Capture(preparedRuntime);
+    const auto firstResult = invocation.Materialize(*preparedCapture);
+    const auto repeatedCapture = invocation.Capture(preparedRuntime);
+    Require(invocation.Materialize(*repeatedCapture) == firstResult, "prepared invocation rebuilt an unchanged materialized result");
+    users[0] += 1;
+    const auto changedCapture = invocation.Capture(preparedRuntime);
+    const auto changedResult = invocation.Materialize(*changedCapture);
+    Require(changedResult != firstResult && changedResult->spirv.data() == firstResult->spirv.data(), "prepared invocation did not distinguish changed runtime data");
+    users[0] -= 1;
+    Require(invocation.Materialize(*preparedCapture) == firstResult, "prepared invocation evicted the previous runtime data");
     ShaderRecompiler::SrtRuntime runtime{};
     runtime.userData = users;
     const auto capture = ShaderRecompiler::CaptureResources(request, runtime, *handle);
@@ -57,6 +78,8 @@ void Run(AgcDriver::VulkanDevice& device) {
     ExpectFailure([&] { static_cast<void>(ShaderRecompiler::CaptureResources(request, runtime, *handle)); }, "does not match the static ABI");
     ExpectFailure([&] { static_cast<void>(ShaderRecompiler::MaterializeShader(request, *capture, *handle)); }, "does not match the static ABI");
     const auto otherHandle = ShaderRecompiler::PrepareShader(request);
+    const auto otherCapture = ShaderRecompiler::CaptureResources(request, runtime, *otherHandle);
+    ExpectFailure([&] { static_cast<void>(invocation.Materialize(*otherCapture)); }, "another prepared shader");
     ExpectFailure([&] { static_cast<void>(ShaderRecompiler::MaterializeShader(request, *capture, *otherHandle)); }, "another prepared shader");
     request.context.compute->numThreads[0] = 1;
     request.layout.pushConstantSizeBytes = 124;

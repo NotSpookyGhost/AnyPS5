@@ -13,11 +13,11 @@ void Driver::verifyDataHit(const ShaderSnapshot& snapshot, std::size_t codeOffse
         std::abort();
     };
     auto verifyMemory = std::make_shared<ShaderMemory>(memory, &queryPendingWrite, &observePendingWrite, hookWaitCounter());
-    const auto handle = SourceHandleFor(snapshot, codeOffset, deviceSerial, request);
-    const auto capture = verifyMemory->Capture(request, handle.get());
+    const auto invocation = InvocationFor(snapshot, codeOffset, deviceSerial, request);
+    const auto capture = verifyMemory->Capture(invocation);
     const auto regions = verifyMemory->Regions();
     request.context.memory = regions;
-    const auto result = ShaderRecompiler::MaterializeShader(request, *capture, *handle);
+    const auto result = invocation.Materialize(*capture);
     std::size_t position = 0, run = 0;
     for (const auto& region : regions) {
         const bool registered = std::any_of(memory.begin(), memory.end(), [&](const auto& known) { return region.guestAddress >= known.guestAddress && region.guestAddress < known.guestAddress + known.bytes.size(); });
