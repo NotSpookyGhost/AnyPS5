@@ -889,6 +889,13 @@ void EmitReadOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {
     }));
 }
 
+std::uint32_t ImageSampleIndex(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {
+    const auto& dimension = RdnaImageDimensionInfoFor(access.image.dimension);
+    if (dimension.multisampled == 0u) return ConstantU32(ctx.state, 0u);
+    if (access.mem.imageAddressComponents <= dimension.coordinateComponents) ctx.Fail(access.inst, "has no sample index in the image address");
+    return AddressU32(ctx, access, dimension.coordinateComponents);
+}
+
 void EmitWriteOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {
     auto& state = ctx.state;
     if (access.slot != 0) {
@@ -899,7 +906,7 @@ void EmitWriteOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {
         const auto mipLod = access.image.mipMode == ImageMipMode::DynamicStorage ? LodU32(ctx, access) : 0u;
         const auto coord = CoordU32(ctx, access);
         const auto texel = access.mem.imagePacked ? PackedStoreTexel(ctx, access, ctx.Arg(access.inst, 2)) : StoreTexel(ctx, access, ctx.Arg(access.inst, 2), uintImage);
-        EmitStorageImageWrite(state, access.mem.resource, mipLod, coord, texel);
+        EmitStorageImageWrite(state, access.mem.resource, mipLod, coord, texel, ImageSampleIndex(ctx, access));
     });
 }
 
@@ -932,7 +939,7 @@ void EmitAtomicOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {
     ctx.Define(access.inst, EmitValueOrZeroIfCondition(state, condition, [&]() {
         const auto pointer = state.module.AllocateId();
         const auto pointerType = TypePointer(state, spv::StorageClassImage, TypeU32(state));
-        state.module.AddFunction(spv::OpImageTexelPointer, pointerType, pointer, StorageImageDescriptorPointer(state, access.mem.resource), CoordU32(ctx, access), ConstantU32(state, 0));
+        state.module.AddFunction(spv::OpImageTexelPointer, pointerType, pointer, StorageImageDescriptorPointer(state, access.mem.resource), CoordU32(ctx, access), ImageSampleIndex(ctx, access));
         if (opcode == IrOpcode::ImageAtomicInc32 || opcode == IrOpcode::ImageAtomicDec32) {
             return AtomicUpdate(state, pointer, ResourceKind::Image, [&](std::uint32_t current) {
                 return opcode == IrOpcode::ImageAtomicInc32 ? AtomicIncrement(state, current, value) : AtomicDecrement(state, current, value);

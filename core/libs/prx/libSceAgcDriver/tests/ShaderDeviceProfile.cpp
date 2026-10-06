@@ -92,6 +92,7 @@ void CheckProfile() {
     invalid([](auto& value) { value.capabilities.push_back(spv::CapabilitySampledImageArrayDynamicIndexing); }, "shaderSampledImageArrayDynamicIndexing");
     invalid([](auto& value) { value.capabilities.push_back(spv::CapabilityStorageImageArrayNonUniformIndexing); }, "shaderStorageImageArrayNonUniformIndexing");
     invalid([](auto& value) { value.capabilities.push_back(spv::CapabilityStorageImageReadWithoutFormat); }, "shaderStorageImageReadWithoutFormat");
+    invalid([](auto& value) { value.capabilities.push_back(spv::CapabilityStorageImageMultisample); }, "shaderStorageImageMultisample");
     invalid([](auto& value) { value.capabilities.push_back(spv::CapabilityFragmentBarycentricKHR); }, "fragmentShaderBarycentric");
     invalid([](auto& value) { value.capabilities.push_back(spv::CapabilityMeshShadingEXT); }, "meshShader");
     ProfileInput enabled;
@@ -113,7 +114,7 @@ void CheckAbi() {
             Require(bindings.insert(BindingNumber(static_cast<Stage>(stage), static_cast<Binding>(binding))).second, "runtime ABI bindings overlap");
         }
     }
-    Require(BindingNumber(Stage::Main, Binding::ShaderData) == 49u && BindingNumber(Stage::Fragment, Binding::ShaderData) == 99u, "runtime ABI binding numbers changed");
+    Require(BindingNumber(Stage::Main, Binding::ShaderData) == 55u && BindingNumber(Stage::Fragment, Binding::ShaderData) == 111u, "runtime ABI binding numbers changed");
     Reject([] { BindingNumber(static_cast<Stage>(4u), Binding::Buffers); }, "invalid stage or binding");
     Reject([] { BindingNumber(Stage::Main, Binding::Count); }, "invalid stage or binding");
     Reject([] { ShaderRecompiler::RuntimeAbi::RequireVersion(0u); }, "incompatible version");
@@ -156,16 +157,12 @@ void CheckHeaps() {
             image.depthCompare = group == 3u;
             image.atomic = group == 6u;
             image.dimension = dimension;
-            if (group >= 4u && (dimension == RdnaImageDimension::Dim2DMsaa || dimension == RdnaImageDimension::Dim2DMsaaArray)) {
-                Reject([&] { DescriptorBindingForImage(image); }, "cannot be multisampled");
-                continue;
-            }
             const auto binding = DescriptorBindingForImage(image);
             Require(classes.insert(static_cast<std::uint32_t>(binding)).second, "typed image classes overlap");
             Require(RuntimeAbi::HeapCapacity(binding) == (group < 4u ? RuntimeAbi::SampledHeapCapacity : RuntimeAbi::StorageHeapCapacity), "typed image class has an invalid capacity");
         }
     }
-    Require(classes.size() == RuntimeAbi::ImageBindingCount && *classes.begin() == 1u && *classes.rbegin() == 43u, "typed image class mapping is incomplete");
+    Require(classes.size() == RuntimeAbi::ImageBindingCount && *classes.begin() == 1u && *classes.rbegin() == RuntimeAbi::ImageBindingCount, "typed image class mapping is incomplete");
     Reject([] { RuntimeAbi::HeapCapacity(RuntimeAbi::Binding::ShaderData); }, "not a typed heap");
 }
 

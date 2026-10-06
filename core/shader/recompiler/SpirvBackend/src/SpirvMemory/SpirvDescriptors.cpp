@@ -125,6 +125,13 @@ std::uint32_t ImageType(SpirvEmitterState& state, const ImageResource& image) {
         FailEmit("invalid image resource class");
     }
     const auto& info = RdnaImageDimensionInfoFor(image.dimension);
+    if (info.multisampled != 0u) {
+        if (sampled == 2u) {
+            if (std::ranges::find(state.supportedCapabilities, spv::CapabilityStorageImageMultisample) == state.supportedCapabilities.end()) FailEmit("storage image multisampling is unavailable on the target device");
+            state.module.EmitCapability(spv::CapabilityStorageImageMultisample);
+        }
+        if (info.arrayed != 0u) state.module.EmitCapability(spv::CapabilityImageMSArray);
+    }
     const auto scalar = image.atomic64 ? TypeScalarU64(state) : ImageScalarType(state, image.numericClass);
     return state.module.Type(spv::OpTypeImage, scalar, info.spirvDimension, image.depthCompare ? 1u : 0u, info.arrayed, info.multisampled, sampled, format);
 }
@@ -199,7 +206,7 @@ std::uint32_t StorageImageDescriptorPointer(SpirvEmitterState& state, std::uint3
     return DescriptorElementPointer(state, pointerType, variable, arrayIndex, kind, resource, "storage image descriptor array was not emitted");
 }
 
-void EmitStorageImageWrite(SpirvEmitterState& state, std::uint32_t resource, std::uint32_t mipLod, std::uint32_t coord, std::uint32_t texel) {
+void EmitStorageImageWrite(SpirvEmitterState& state, std::uint32_t resource, std::uint32_t mipLod, std::uint32_t coord, std::uint32_t texel, std::uint32_t sample) {
     const auto& image = state.runtimeImage != nullptr ? *state.runtimeImage : state.program.Info().images.at(resource);
     if (image.resourceClass != ImageResourceClass::Storage) {
         FailEmit("storage image write requested for a non-storage image");
@@ -218,6 +225,11 @@ void EmitStorageImageWrite(SpirvEmitterState& state, std::uint32_t resource, std
         state.module.AddFunction(spv::OpLoad, imageType, descriptor, pointer);
         return descriptor;
     };
+    if (RdnaImageDimensionInfoFor(image.dimension).multisampled != 0u) {
+        if (sample == 0u || image.mipMode == ImageMipMode::DynamicStorage) FailEmit("multisampled storage image requires a sample and cannot have mip levels");
+        state.module.AddFunction(spv::OpImageWrite, loadAt(arrayIndex), coord, texel, spv::ImageOperandsSampleMask, sample);
+        return;
+    }
     if (image.mipMode != ImageMipMode::DynamicStorage) {
         state.module.AddFunction(spv::OpImageWrite, loadAt(arrayIndex), coord, texel);
         return;

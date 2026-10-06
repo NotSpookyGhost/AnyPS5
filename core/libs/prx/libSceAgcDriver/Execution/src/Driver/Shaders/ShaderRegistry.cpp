@@ -143,12 +143,10 @@ QueueState RegisteredState(const ShaderSnapshot& snapshot) {
     const auto header = ReadHeader(snapshot);
     QueueState state{};
     for (const auto reg : ReadHeaderArray(snapshot, header.sh_registers, header.num_sh_registers)) {
-        if (state.shader.contains(reg.offset)) throw std::runtime_error("AGC driver: duplicate shader register");
-        state.shader[reg.offset] = reg.value;
+        state.shader.insert_or_assign(reg.offset, reg.value);
     }
     for (const auto reg : ReadHeaderArray(snapshot, header.cx_registers, header.num_cx_registers)) {
-        if (state.context.contains(reg.offset)) throw std::runtime_error("AGC driver: duplicate context register");
-        state.context[reg.offset] = reg.value;
+        state.context.insert_or_assign(reg.offset, reg.value);
     }
     if (header.specials != nullptr) {
         const auto special = ReadHeaderArray(snapshot, header.specials, 1).front();

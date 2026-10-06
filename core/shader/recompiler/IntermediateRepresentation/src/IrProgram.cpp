@@ -850,17 +850,15 @@ DescriptorBindingKind DescriptorBindingForImage(const ImageResource& image) {
     constexpr std::uint32_t sampledUintBinding = 8u;
     constexpr std::uint32_t sampledSintBinding = 15u;
     constexpr std::uint32_t storageFloatBinding = FirstStorageImageBinding;
-    constexpr std::uint32_t storageUintBinding = storageFloatBinding + 5u;
-    constexpr std::uint32_t atomicUintBinding = storageUintBinding + 5u;
-    constexpr std::uint32_t atomic64UintBinding = atomicUintBinding + 5u;
+    constexpr std::uint32_t storageUintBinding = storageFloatBinding + 7u;
+    constexpr std::uint32_t atomicUintBinding = storageUintBinding + 7u;
+    constexpr std::uint32_t atomic64UintBinding = atomicUintBinding + 7u;
 
     std::uint32_t base = 0u;
-    bool sampled = false;
     if (image.resourceClass == ImageResourceClass::Sampled) {
         if (image.atomic) {
             fail("DescriptorBindingForImage sampled image cannot be atomic");
         }
-        sampled = true;
         switch (image.numericClass) {
             case IrTextureNumericClass::Float:
                 base = image.depthCompare ? FirstComparisonImageBinding : sampledFloatBinding;
@@ -916,19 +914,13 @@ DescriptorBindingKind DescriptorBindingForImage(const ImageResource& image) {
             dimension = 3u;
             break;
         case RdnaImageDimension::Dim2DMsaa:
-            if (!sampled) {
-                fail("DescriptorBindingForImage storage image cannot be multisampled");
-            }
             dimension = 4u;
             break;
         case RdnaImageDimension::Dim2DMsaaArray:
-            if (!sampled) {
-                fail("DescriptorBindingForImage storage image cannot be multisampled");
-            }
             dimension = 5u;
             break;
         case RdnaImageDimension::Dim3D:
-            dimension = sampled ? 6u : 4u;
+            dimension = 6u;
             break;
         case RdnaImageDimension::Unknown:
         default:

@@ -3,11 +3,14 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Acb.hpp"
+#include <spirv/unified1/spirv.hpp>
+#include <algorithm>
 #include <array>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -89,11 +92,61 @@ void Run(AgcDriver::VulkanDevice& device) {
     ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, device.Serial(), request)); }, "artifact is missing");
 }
 
+void PrepareMultisampledStorage(AgcDriver::VulkanDevice& device) {
+    using namespace ShaderRecompiler;
+    std::array<std::uint32_t, 13> code{0xd7460000u, 0x0401060cu, 0xd7460001u, 0x0405060du, 0x7e04020eu, 0x7e060280u, 0x7e080208u, 0x7e0a0209u, 0x7e0c020au, 0x7e0e020bu, 0xf0200f38u, 0x00000400u, 0xbf810000u};
+    RecompileRequest request{};
+    request.shader = {ShaderStage::Compute, 0x30000u, code, 0, {}};
+    request.context.waveSize = 32;
+    request.context.compute = ShaderComputeStageInfo{{8, 8, 1}, 0, {true, true, false}, false, 2, {}};
+    request.target = device.ComputeTarget(32);
+    request.layout.pushConstantSizeBytes = 128;
+    request.useCache = false;
+    for (std::uint32_t variant = 0; variant < 5; ++variant) {
+        if (variant != 0u) {
+            code[10] = variant % 2u != 0u ? 0xf0200f38u : 0xf0200f30u;
+            if (variant >= 3u) code[10] = variant == 3u ? 0xf03c0138u : 0xf03c0130u;
+            code[5] = 0x7e060283u;
+            code[4] = 0x7e040282u;
+        }
+        const auto handle = PrepareShader(request);
+        const auto& artifact = GetPreparedArtifact(*handle);
+        std::vector<std::uint32_t> samples;
+        for (std::size_t offset = 5; offset < artifact.spirv.size(); offset += artifact.spirv[offset] >> 16u) {
+            const auto instruction = artifact.spirv[offset];
+            if ((instruction & 0xffffu) == spv::OpImageWrite) {
+                Require(variant < 3u && (instruction >> 16u) == 6u && artifact.spirv[offset + 4] == spv::ImageOperandsSampleMask, "MSAA storage write lost its sample operand");
+                samples.push_back(artifact.spirv[offset + 5]);
+            }
+            if ((instruction & 0xffffu) == spv::OpImageTexelPointer) {
+                Require(variant >= 3u && (instruction >> 16u) == 6u, "MSAA atomic lost its sample operand");
+                samples.push_back(artifact.spirv[offset + 5]);
+            }
+        }
+        Require(!samples.empty(), "MSAA storage shader has no image writes or atomics");
+        const auto expectedSample = variant == 0u ? 0u : variant % 2u != 0u ? 3u : 2u;
+        for (const auto sample : samples) {
+            bool found = false;
+            for (std::size_t offset = 5; offset < artifact.spirv.size(); offset += artifact.spirv[offset] >> 16u) {
+                if ((artifact.spirv[offset] & 0xffffu) != spv::OpConstant || artifact.spirv[offset + 2] != sample) continue;
+                Require(artifact.spirv[offset + 3] == expectedSample, "MSAA storage operation addresses the wrong sample");
+                found = true;
+            }
+            Require(found, "MSAA sample constant is missing");
+        }
+    }
+    std::vector<std::uint32_t> capabilities(request.target.supportedCapabilities.begin(), request.target.supportedCapabilities.end());
+    std::erase(capabilities, spv::CapabilityStorageImageMultisample);
+    request.target.supportedCapabilities = capabilities;
+    ExpectFailure([&] { static_cast<void>(PrepareShader(request)); }, "storage image multisampling is unavailable on the target device");
+}
+
 void Registration(bool indirect) {
     alignas(256) std::array<std::uint32_t, 1> code{0xbf810000u};
     struct Header {
         Shader shader{};
-        std::array<ShaderRegister, 7> registers{};
+        std::array<ShaderRegister, 9> registers{};
+        std::array<ShaderRegister, 2> context{{{0x1b6, 0}, {0x1b6, 1}}};
         ShaderSpecialRegs specials{};
     } header;
     const auto address = reinterpret_cast<std::uintptr_t>(code.data());
@@ -104,9 +157,12 @@ void Registration(bool indirect) {
     header.shader.code = code.data();
     header.shader.sh_registers = header.registers.data();
     header.shader.num_sh_registers = header.registers.size();
+    header.shader.cx_registers = header.context.data();
+    header.shader.num_cx_registers = header.context.size();
     header.shader.specials = &header.specials;
     header.specials.dispatch_modifier = 0x8000;
-    header.registers = {{{0x20c, static_cast<std::uint32_t>(address >> 8u)}, {0x20d, static_cast<std::uint32_t>(address >> 40u)}, {0x207, 1}, {0x208, 1}, {0x209, 1}, {0x212, 0}, {0x213, 0}}};
+    header.registers = {{{0x20c, static_cast<std::uint32_t>(address >> 8u)}, {0x20d, static_cast<std::uint32_t>(address >> 40u)}, {0x207, 2}, {0x208, 1}, {0x209, 1}, {0x212, 0}, {0x213, 0}, {0x207, 1}, {0x207, 1}}};
+    const auto threadRegisterIndex = header.registers.size() - 1;
     AgcDriverRegisterShader_nid_postfix(&header.shader);
     header.registers[1].value |= 0x100u;
     ExpectFailure([&] { AgcDriverRegisterShader_nid_postfix(&header.shader); }, "invalid registered program address");
@@ -114,12 +170,12 @@ void Registration(bool indirect) {
     ++header.registers[0].value;
     ExpectFailure([&] { AgcDriverRegisterShader_nid_postfix(&header.shader); }, "entry point is outside shader code");
     --header.registers[0].value;
-    header.shader.num_sh_registers = header.registers.size() + sizeof(header.specials) / sizeof(ShaderRegister) + 1;
+    header.shader.num_sh_registers = 255;
     ExpectFailure([&] { AgcDriverRegisterShader_nid_postfix(&header.shader); }, "truncated shader metadata");
     header.shader.num_sh_registers = header.registers.size();
-    header.registers[2].value = 0;
+    header.registers[threadRegisterIndex].value = 0;
     ExpectFailure([&] { AgcDriverRegisterShader_nid_postfix(&header.shader); }, "must be nonzero");
-    header.registers[2].value = 1;
+    header.registers[threadRegisterIndex].value = 1;
     code[0] = 0xffffffffu;
     ExpectFailure([&] { AgcDriverRegisterShader_nid_postfix(&header.shader); }, "");
     std::vector<std::uint32_t> commands;
@@ -135,7 +191,7 @@ void Registration(bool indirect) {
     }
     std::uint32_t destination = 0;
     const auto destinationAddress = reinterpret_cast<std::uintptr_t>(&destination);
-    commands[8] = 2;
+    commands[threadRegisterIndex * 3 + 2] = 2;
     commands.insert(commands.end(), {0xc0033700u, 0x00100200u, static_cast<std::uint32_t>(destinationAddress), static_cast<std::uint32_t>(destinationAddress >> 32u), 7});
     packet = Packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
     sceAgcDriverSubmitAcb(0x20, &packet);
@@ -153,6 +209,7 @@ int main(int argc, char** argv) {
         auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         Run(*device);
+        PrepareMultisampledStorage(*device);
         device.reset();
         Registration(argc == 2);
         std::cout << "prepared shader and transactional registration tests passed\n";
