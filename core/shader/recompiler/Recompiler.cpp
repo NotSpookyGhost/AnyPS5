@@ -866,6 +866,18 @@ std::shared_ptr<const SourceHandle> PrepareShader(const RecompileRequest& reques
 }
 
 bool MatchesPreparedShader(const RecompileRequest& request, const SourceHandle& handle) {
+    struct PreparedKeyStorage {};
+    auto& key = HostThreadLocal<std::vector<std::uint64_t>, PreparedKeyStorage>();
+    BuildPreparedShaderKey(request, key);
+    return MatchesPreparedShader(request, handle, key);
+}
+
+void BuildPreparedShaderKey(const RecompileRequest& request, std::vector<std::uint64_t>& key) {
+    RecompileCacheKey::BuildInterface(request, key);
+    key.push_back(HostSubgroupSize(request));
+}
+
+bool MatchesPreparedShader(const RecompileRequest& request, const SourceHandle& handle, std::span<const std::uint64_t> key) {
     if (handle.source == nullptr || handle.artifact == nullptr) return false;
     const auto& layout = request.layout;
     const auto& prepared = handle.artifact->bindings.layout;
@@ -874,11 +886,7 @@ bool MatchesPreparedShader(const RecompileRequest& request, const SourceHandle& 
     const auto words = prepared.ShaderDataDwords();
     const bool usesPush = prepared.runtimeImageCount == 0u && words != 0u && words <= layout.pushConstantSizeBytes / 4u;
     if (prepared.UsesPushData() != usesPush) return false;
-    struct PreparedKeyStorage {};
-    auto& key = HostThreadLocal<std::vector<std::uint64_t>, PreparedKeyStorage>();
-    RecompileCacheKey::BuildInterface(request, key);
-    key.push_back(HostSubgroupSize(request));
-    if (key != handle.staticKey || handle.source->code.size() != request.shader.code.size()) return false;
+    if (!std::ranges::equal(key, handle.staticKey) || handle.source->code.size() != request.shader.code.size()) return false;
     return handle.source->code.data() == request.shader.code.data() || std::ranges::equal(handle.source->code, request.shader.code);
 }
 
@@ -890,7 +898,14 @@ std::span<const std::uint32_t> GetPreparedCode(const SourceHandle& handle) {
 PreparedShaderInvocation::PreparedShaderInvocation(const RecompileRequest& request, const std::shared_ptr<const SourceHandle>& handle) : request(request), handle(handle) {}
 
 std::optional<PreparedShaderInvocation> PreparedShaderInvocation::TryCreate(const RecompileRequest& request, const std::shared_ptr<const SourceHandle>& handle) {
-    if (handle == nullptr || !MatchesPreparedShader(request, *handle)) return std::nullopt;
+    struct PreparedKeyStorage {};
+    auto& key = HostThreadLocal<std::vector<std::uint64_t>, PreparedKeyStorage>();
+    BuildPreparedShaderKey(request, key);
+    return TryCreate(request, handle, key);
+}
+
+std::optional<PreparedShaderInvocation> PreparedShaderInvocation::TryCreate(const RecompileRequest& request, const std::shared_ptr<const SourceHandle>& handle, std::span<const std::uint64_t> key) {
+    if (handle == nullptr || !MatchesPreparedShader(request, *handle, key)) return std::nullopt;
     if (request.shader.stage != ShaderStage::Compute && request.shader.stage != ShaderStage::Fragment) static_cast<void>(RequestInputInfo(request));
     return PreparedShaderInvocation(request, handle);
 }
