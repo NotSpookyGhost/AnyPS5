@@ -6,6 +6,7 @@
 #include "IntermediateRepresentation/IrBuilder.hpp"
 #include "IntermediateRepresentation/IrProgram.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
+#include "Translation/EmbeddedVertexFetch.hpp"
 #include <cstdint>
 
 namespace ShaderRecompiler {
@@ -31,6 +32,7 @@ struct TranslateOptions {
     std::uint64_t shaderHash = 0;
     bool fragmentShaderBarycentricEnabled = false;
     ShaderStageInputInfo inputInfo;
+    const EmbeddedFetchPlan* embeddedFetch = nullptr;
 };
 
 class InstructionTranslator {

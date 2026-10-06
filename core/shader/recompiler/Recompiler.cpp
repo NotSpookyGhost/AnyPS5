@@ -6,6 +6,8 @@
 #include <cstdio>
 #include "CacheKey.hpp"
 #include "CompiledVariant.hpp"
+#include "VertexInputSpecialization.hpp"
+#include "RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include "ShaderDiskCache.hpp"
 #include <list>
 #include <map>
@@ -117,6 +119,11 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request) {
 
     constexpr InstructionTranslator translator;
 
+    EmbeddedFetchPlan embeddedFetch;
+    if ((stageKind == ShaderStageKind::Vertex || stageKind == ShaderStageKind::Local) && inputInfo.vertex != nullptr && inputInfo.vertex->fetchEmbedded) {
+        embeddedFetch = EmbeddedVertexFetchAnalyzer{}.Analyze(decoded, inputInfo.vertex->fetchAttribReg, inputInfo.vertex->fetchBufferReg, request.context.userDataBaseRegister, static_cast<std::uint32_t>(request.context.userData.size()), request.context.waveSize);
+        translateOptions.embeddedFetch = &embeddedFetch;
+    }
     auto program = translator.Translate(decoded, cfg, translateOptions);
     // Debug aid: APS5_DUMP_IR=<hex code address> (or "all") prints the program after each front-end pass.
     const auto dumpIr = [&](const char* pass) {
@@ -298,7 +305,7 @@ std::uint64_t nextVariantId() {
     return variants.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
-CompiledVariant compileVariant(const RecompileRequest& request, IrProgram program, std::exception_ptr* emissionFailure = nullptr) {
+CompiledVariant compileVariant(const RecompileRequest& request, IrProgram program, std::exception_ptr* emissionFailure = nullptr) try {
     const auto inputInfo = RequestInputInfo(request);
     constexpr DeadCodeEliminator deadCodeEliminator;
     constexpr ResourceMaterializer resourceMaterializer;
@@ -325,17 +332,7 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     constexpr SpirvEmitter spirvEmitter;
     CompiledShaderArtifact result;
     result.variantId = nextVariantId();
-    try {
-        result.spirv = spirvEmitter.Emit(program, inputInfo, bindings, targetOptions);
-#if ANYPS5_ENABLE_SPIRV_TOOLS
-        result.spirv = ValidateAndOptimizeSpirv(result.spirv, request.target.vulkanVersion, request.target.spirvVersion, request.target.nonConstantImageOffsets);
-#endif
-    } catch (const std::bad_alloc&) {
-        throw;
-    } catch (...) {
-        if (emissionFailure != nullptr) *emissionFailure = std::current_exception();
-        throw;
-    }
+    result.spirv = spirvEmitter.Emit(program, inputInfo, bindings, targetOptions);
 
     result.bdaAbiVersion = program.Info().usesDma ? request.target.bdaAbiVersion : 0u;
     result.memoryOffsetDword = bindings.layout.memoryOffsetDword;
@@ -356,10 +353,36 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
             if (input.kind != StageInputKind::Parameter) continue;
             if (input.location >= static_cast<std::uint32_t>(inputInfo.vertex->resourcesNum)) throw std::runtime_error("vertex attribute location exceeds resource count");
             result.vertexInputs.push_back({input.location, input.componentCount, inputInfo.vertex->resourcesDst[input.location].fetchIndex});
+            if (inputInfo.vertex->fetchEmbedded) {
+                for (const auto& block : program.Blocks()) {
+                    for (const auto* instruction : block->Instructions()) {
+                        if (instruction->Opcode() == IrOpcode::GetAttribute && instruction->Argument(0)->Resolve()->ImmediateU32() == input.location) result.vertexInputs.back().outputMask |= 1u << instruction->Argument(1)->Resolve()->ImmediateU32();
+                    }
+                }
+            }
         }
     }
 
+    const bool embedded = !result.vertexInputs.empty() && inputInfo.vertex != nullptr && inputInfo.vertex->fetchEmbedded;
+    if (embedded) PrepareVertexInputSpecialization(result);
+#if ANYPS5_ENABLE_SPIRV_TOOLS
+    result.spirv = ValidateAndOptimizeSpirv(result.spirv, request.target.vulkanVersion, request.target.spirvVersion, request.target.nonConstantImageOffsets, !embedded);
+    if (embedded) {
+        std::array<std::uint32_t, ShaderVertexStageInfo::MaxResources> classes{};
+        for (std::uint32_t kind = 1u; kind < 3u; ++kind) {
+            classes.fill(kind);
+            const auto specialized = SpecializeVertexInputTypes(result, classes);
+            static_cast<void>(ValidateAndOptimizeSpirv(specialized, request.target.vulkanVersion, request.target.spirvVersion, request.target.nonConstantImageOffsets, false));
+        }
+    }
+#endif
+
     return {request.layout, std::move(program).TakeCompiledInfo(), std::move(static_cast<CompiledBindingLayout&>(bindings)), std::move(result)};
+} catch (const std::bad_alloc&) {
+    throw;
+} catch (...) {
+    if (emissionFailure != nullptr) *emissionFailure = std::current_exception();
+    throw;
 }
 
 std::uint64_t specializationId(std::uint64_t artifact, std::span<const PipelineSpecializationConstant> constants) {
@@ -375,6 +398,16 @@ std::uint64_t specializationId(std::uint64_t artifact, std::span<const PipelineS
     return entry->second;
 }
 
+SharedSpirv specializeVertexInputs(const CompiledShaderArtifact& artifact, std::span<const std::uint32_t> classes) {
+    if (artifact.vertexInputPatches.empty()) return artifact.spirv;
+    static std::mutex mutex;
+    static std::map<std::pair<std::uint64_t, std::vector<std::uint32_t>>, SharedSpirv> modules;
+    std::pair key{artifact.variantId, std::vector<std::uint32_t>(classes.begin(), classes.end())};
+    std::lock_guard lock(mutex);
+    if (const auto found = modules.find(key); found != modules.end()) return found->second;
+    return modules.emplace(std::move(key), SpecializeVertexInputTypes(artifact, classes)).first->second;
+}
+
 RecompileResult materializeResult(const CompiledVariant& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot) {
     RecompileResult result;
     static_cast<CompiledShaderArtifact&>(result) = variant.artifact;
@@ -385,13 +418,35 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
     DescriptorBindingBuilder{}.Populate(bindings, variant.info.info, variant.info.stage, variant.info.userDataBase, snapshot, partialThreads(request), request.context.pixel ? std::span<const std::uint8_t>(request.context.pixel->targetExportMapping) : std::span<const std::uint8_t>{});
     result.bindings = std::move(bindings.bindings);
     result.specialization = std::move(bindings.specialization);
-    result.specializationId = specializationId(result.variantId, result.specialization);
     result.pushConstants = std::move(bindings.pushConstants);
     result.vertexAttributes.reserve(result.vertexInputs.size());
+    std::array<std::uint32_t, ShaderVertexStageInfo::MaxResources> vertexClasses{};
     for (const auto& input : result.vertexInputs) {
         if (!request.context.vertex || input.location >= request.context.vertex->resourcesNum || input.location >= request.context.vertex->resources.size()) throw std::runtime_error("Shader cache: invalid vertex attribute metadata");
-        result.vertexAttributes.push_back({input.location, input.components, request.context.vertex->resources[input.location], input.fetchIndex});
+        const auto& vertex = *request.context.vertex;
+        const auto& resource = vertex.resources[input.location];
+        const auto fetchIndex = vertex.fetchEmbedded ? vertex.resourcesDst[input.location].fetchIndex : input.fetchIndex;
+        result.vertexAttributes.push_back({input.location, input.components, resource, fetchIndex});
+        if (!result.vertexInputPatches.empty()) {
+            const auto numeric = VertexInputNumericClass(static_cast<IrBufferFormat>((resource.fields[3] >> 12u) & 0x7fu));
+            if (numeric == IrTextureNumericClass::Unsupported) throw std::runtime_error("unsupported prepared vertex format");
+            const auto kind = numeric == IrTextureNumericClass::Float ? 0u : numeric == IrTextureNumericClass::Sint ? 1u : 2u;
+            vertexClasses.at(input.location) = kind;
+            const auto first = PipelineSpecialization::VertexBase + input.location * PipelineSpecialization::VertexWords;
+            auto& formatComponents = result.vertexAttributes.back().formatComponents;
+            formatComponents = 1u;
+            for (std::uint32_t component = 0; component < 4u; ++component) {
+                const auto selector = (input.outputMask & (1u << component)) != 0u ? (resource.fields[3] >> (component * 3u)) & 7u : 0u;
+                if (selector == 2u || selector == 3u) throw std::runtime_error("reserved prepared vertex component selector");
+                if (selector >= 4u) formatComponents = std::max(formatComponents, selector - 3u);
+                result.specialization.push_back({first + component, selector});
+            }
+            result.specialization.push_back({first + 4u, kind == 0u ? 0x3f800000u : 1u});
+            result.specialization.push_back({first + 5u, kind});
+        }
     }
+    result.spirv = specializeVertexInputs(variant.artifact, vertexClasses);
+    result.specializationId = specializationId(result.variantId, result.specialization);
     return result;
 }
 
@@ -539,12 +594,13 @@ std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapsh
     if (request.context.pixel) {
         for (const auto mapping : request.context.pixel->targetExportMapping) mix(mapping);
     }
-    if (request.context.vertex && !request.context.vertex->fetchEmbedded) {
+    if (request.context.vertex) {
         const auto& vertex = *request.context.vertex;
         const auto count = std::min<std::uint32_t>(vertex.resourcesNum, ShaderVertexStageInfo::MaxResources);
         mix(count);
         for (std::uint32_t i = 0; i < count; ++i) {
             for (const auto field : vertex.resources[i].fields) mix(field);
+            mix(vertex.resourcesDst[i].fetchIndex);
         }
     } else {
         mix(1ull << 32u);

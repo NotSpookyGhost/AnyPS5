@@ -452,6 +452,7 @@ bool ValidationKey(const Context& context, std::span<const CompiledShader> shade
                 add(attribute.location);
                 add(attribute.components);
                 add(attribute.fetchIndex);
+                add(attribute.formatComponents);
                 // The data format bits of the V# decide the attribute's signature.
                 add((attribute.resource.fields[3] >> 12u) & 0x7fu);
             }

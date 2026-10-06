@@ -196,7 +196,13 @@ ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const st
     for (std::uint32_t i = 0; i < shader.num_input_semantics; ++i) {
         const auto& semantic = semantics[i];
         if (semantic.static_vb_index == 1 || semantic.static_attribute == 1) throw std::runtime_error("AGC graphics: statically bound vertex attributes are not implemented");
-        if (staticAbi) continue;
+        if (staticAbi) {
+            auto& destination = info.resourcesDst.at(info.resourcesNum++);
+            destination.registerStart = static_cast<std::int32_t>(semantic.hardware_mapping);
+            destination.registersNum = static_cast<std::int32_t>(semantic.size_in_elements);
+            destination.attrId = static_cast<std::int32_t>(semantic.semantic);
+            continue;
+        }
         std::array<std::byte, 4> attribWordBytes{};
         const auto attribWordAddress = attribTableAddr + static_cast<std::uint64_t>(semantic.semantic) * 4u;
         AgcDriver::GuestMemory::Read(attribWordAddress, attribWordBytes, 4);

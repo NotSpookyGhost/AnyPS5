@@ -5,6 +5,7 @@
 #include "SpirvBackend/SpirvBda.hpp"
 #include <spirv/unified1/GLSL.std.450.h>
 #include <spirv/unified1/spirv.hpp>
+#include "PipelineSpecialization.hpp"
 #include <algorithm>
 #include <array>
 #include <limits>
@@ -1059,6 +1060,18 @@ std::uint32_t EmitGetBuiltin(SpirvValueEmitContext& ctx, const IrValue* kind, co
 }
 
 std::uint32_t EmitGetAttribute(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    if (inst.Flags<std::uint32_t>() == 1u) {
+        auto& state = ctx.state;
+        const auto attribute = inst.Argument(0)->ImmediateU32();
+        const auto component = inst.Argument(1)->ImmediateU32();
+        if (state.inputInfo.vertex == nullptr || !state.inputInfo.vertex->fetchEmbedded || component >= 4u) ctx.Fail(inst, "invalid prepared vertex attribute");
+        const auto first = PipelineSpecialization::VertexBase + attribute * PipelineSpecialization::VertexWords;
+        const auto selector = state.module.SpecializationConstant(TypeU32(state), first + component, component + 4u);
+        const auto one = state.module.SpecializationConstant(TypeU32(state), first + 4u, 0x3f800000u);
+        auto value = Select(state, TypeU32(state), Binary(state, spv::OpIEqual, TypeBool(state), selector, ConstantU32(state, 1u)), one, ConstantU32(state, 0u));
+        for (std::uint32_t channel = 0; channel < 4u; ++channel) value = Select(state, TypeU32(state), Binary(state, spv::OpIEqual, TypeBool(state), selector, ConstantU32(state, channel + 4u)), EmitAttributeValue(state, attribute, channel), value);
+        return value;
+    }
     return EmitAttributeValue(ctx.state, inst.Argument(0)->ImmediateU32(), inst.Argument(1)->ImmediateU32());
 }
 

@@ -4,6 +4,7 @@
 #include "SpirvBackend/SpirvBufferFormat.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvSubgroup.hpp"
 #include "PipelineSpecialization.hpp"
+#include <algorithm>
 #include <array>
 #include <vector>
 
@@ -57,9 +58,9 @@ RuntimeDescriptor descriptor(SpirvValueEmitContext& context, const IrValue& inst
     const auto word3 = memory.gpuDescriptor ? context.Arg(*handle, 3u) : state.module.SpecializationConstant(TypeU32(state), first + 1u, 0u);
     const auto u32 = TypeU32(state);
     auto base = ConstantU32(state, 0u);
-    if (memory.gpuDescriptor) {
+    if (memory.gpuDescriptor || BufferAccessOf(instruction.Opcode()) == BufferAccess::Atomic) {
         const auto u64 = TypeScalarU64(state);
-        const auto high = Binary(state, spv::OpShiftLeftLogical, u64, Unary(state, spv::OpUConvert, u64, field(state, word1, 0u, 16u)), BdaConstant(state, 32u));
+        const auto high = Binary(state, spv::OpShiftLeftLogical, u64, Unary(state, spv::OpUConvert, u64, field(state, context.Arg(*handle, 1u), 0u, 16u)), BdaConstant(state, 32u));
         base = Binary(state, spv::OpBitwiseOr, u64, Unary(state, spv::OpUConvert, u64, context.Arg(*handle, 0u)), high);
     }
     auto invalid = nonzero(state, field(state, word3, 30u, 2u));
@@ -383,11 +384,9 @@ void EmitRuntimeBufferStore(SpirvValueEmitContext& context, const IrValue& instr
 
 std::uint32_t EmitRuntimeScalarBufferLoad(SpirvValueEmitContext& context, const IrValue& instruction) {
     auto& state = context.state;
+    if (std::ranges::find(state.supportedCapabilities, spv::CapabilityInt64) == state.supportedCapabilities.end()) context.Fail(instruction, "scalar buffer bounds require shaderInt64");
+    state.module.EmitCapability(spv::CapabilityInt64);
     const auto resource = descriptor(context, instruction);
-    if (!context.Memory(instruction).gpuDescriptor) {
-        const auto byte = EmitAndConstant(state, EmitAddU32(state, context.Arg(instruction, 1u), ConstantU32(state, context.Memory(instruction).offset)), ~3u);
-        return EmitValueOrZeroIfCondition(state, resource.valid, [&] { return readBuffer(context, instruction, byte, 32u); });
-    }
     const auto u64 = TypeScalarU64(state);
     const auto size = Select(state, u64, equal(state, resource.stride, ConstantU32(state, 0u)), Unary(state, spv::OpUConvert, u64, resource.records), Binary(state, spv::OpIMul, u64, Unary(state, spv::OpUConvert, u64, resource.stride), Unary(state, spv::OpUConvert, u64, resource.records)));
     const auto address = EmitAddU32(state, context.Arg(instruction, 1u), ConstantU32(state, context.Memory(instruction).offset));
@@ -395,6 +394,7 @@ std::uint32_t EmitRuntimeScalarBufferLoad(SpirvValueEmitContext& context, const 
     const auto byte = EmitAndConstant(state, address, ~3u);
     const auto offset = Unary(state, spv::OpUConvert, u64, byte);
     const auto inBounds = both(state, noCarry, both(state, resource.valid, Binary(state, spv::OpULessThanEqual, TypeBool(state), Binary(state, spv::OpIAdd, u64, offset, BdaConstant(state, 4u)), size)));
+    if (!context.Memory(instruction).gpuDescriptor) return EmitValueOrZeroIfCondition(state, inBounds, [&] { return readBuffer(context, instruction, byte, 32u); });
     return EmitValueOrZeroIfCondition(state, inBounds, [&] { return readBuffer(context, instruction, AddBdaAddress(context, instruction, resource.base, offset, false), 32u); });
 }
 
@@ -412,8 +412,11 @@ std::uint32_t EmitRuntimeBufferAtomic(SpirvValueEmitContext& context, const IrVa
             if (!context.Memory(instruction).gpuDescriptor) {
                 const auto storage = directAccess(context, instruction, bits == 64u);
                 const auto byte = EmitAddU32(state, access.guest, storage.byteOffset);
+                const auto unaligned = nonzero(state, EmitAndConstant(state, byte, bits / 8u - 1u));
+                const auto guest = Binary(state, spv::OpIAdd, TypeScalarU64(state), resource.base, Unary(state, spv::OpUConvert, TypeScalarU64(state), access.guest));
+                faultIf(context, instruction, unaligned, guest, bits / 8u, BdaAbi::FaultReason::Unaligned);
                 const auto index = Binary(state, spv::OpShiftRightLogical, TypeU32(state), byte, ConstantU32(state, bits == 64u ? 3u : 2u));
-                return EmitValueOrDefaultIfCondition(state, EmitMemoryElementInBounds(state, storage, index), type, zero, [&] {
+                return EmitValueOrDefaultIfCondition(state, both(state, Unary(state, spv::OpLogicalNot, TypeBool(state), unaligned), EmitMemoryElementInBounds(state, storage, index)), type, zero, [&] {
                     const auto pointer = EmitStorageBufferElementPointer(state, storage, index, bits == 64u ? TypeStorageBufferU64ElementPointer(state) : TypeStorageBufferElementPointer(state));
                     return operation(pointer);
                 });

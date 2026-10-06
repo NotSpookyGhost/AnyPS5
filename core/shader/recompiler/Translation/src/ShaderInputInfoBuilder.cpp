@@ -159,13 +159,14 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         vertexStorage.fetchExternal = false;
         vertexStorage.fetchAttribReg = static_cast<int>(vertex.fetchAttribReg);
         vertexStorage.fetchBufferReg = static_cast<int>(vertex.fetchBufferReg);
-        vertexStorage.resourcesNum = vertex.fetchEmbedded ? 0 : static_cast<int>(vertex.resourcesNum);
+        vertexStorage.resourcesNum = static_cast<int>(vertex.resourcesNum);
         for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(vertexStorage.resourcesNum); ++i) {
             vertexStorage.resources[i].fields = vertex.resources[i].fields;
+            if (vertex.fetchEmbedded) vertexStorage.resources[i].fields = {0u, 0u, 0u, (static_cast<std::uint32_t>(IrBufferFormat::Format32_32_32_32Float) << 12u) | ShaderImageIdentitySwizzle};
             vertexStorage.resourcesDst[i].registerStart = vertex.resourcesDst[i].registerStart;
             vertexStorage.resourcesDst[i].registersNum = vertex.resourcesDst[i].registersNum;
             vertexStorage.resourcesDst[i].attrId = vertex.resourcesDst[i].attrId;
-            vertexStorage.resourcesDst[i].fetchIndex = vertex.resourcesDst[i].fetchIndex;
+            vertexStorage.resourcesDst[i].fetchIndex = vertex.fetchEmbedded ? 0u : vertex.resourcesDst[i].fetchIndex;
         }
         _detectVertexBuffers(vertexStorage);
         if (stage == ShaderStageKind::Local || stage == ShaderStageKind::TessellationControl || stage == ShaderStageKind::TessellationEvaluation) {

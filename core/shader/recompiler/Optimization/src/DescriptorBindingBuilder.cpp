@@ -217,12 +217,17 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
     for (std::uint32_t index = 0; index < info.buffers.size(); ++index) {
         const auto& descriptor = snapshot.buffers.at(index);
         if (descriptor.dwordCount != 4u) fail("buffer specialization requires four descriptor words");
+        const auto& buffer = info.buffers[index];
+        const auto format = (descriptor.dwords[3] >> 12u) & 0x7fu;
+        const bool present = descriptor.dwords[0] != 0u || (descriptor.dwords[1] & 0xffffu) != 0u;
+        if (buffer.descriptorFormatted && (format > static_cast<std::uint32_t>(IrBufferFormat::Format32_32_32_32Float) || (present && format == 0u))) fail("buffer specialization has an unsupported format");
         const auto first = PipelineSpecialization::BufferBase + index * PipelineSpecialization::BufferWords;
         allocation.specialization.push_back({first, descriptor.dwords[1] & 0xffff0000u});
         allocation.specialization.push_back({first + 1u, descriptor.dwords[3]});
-        allocation.specialization.push_back({first + 2u, descriptor.dwords[0] != 0u || (descriptor.dwords[1] & 0xffffu) != 0u ? 1u : 0u});
-        if (info.buffers[index].formatted) {
+        allocation.specialization.push_back({first + 2u, present ? 1u : 0u});
+        if (buffer.formattedReadMask != 0u) {
             for (std::uint32_t component = 0; component < 4u; ++component) {
+                if ((buffer.formattedReadMask & (1u << component)) == 0u) continue;
                 const auto selector = (descriptor.dwords[3] >> (component * 3u)) & 7u;
                 if (selector == 2u || selector == 3u) fail("buffer specialization has a reserved component selector");
             }

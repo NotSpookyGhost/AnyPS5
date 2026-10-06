@@ -343,6 +343,7 @@ struct VertexAttribute {
     std::uint32_t components;
     ShaderVertexBufferResource resource;
     std::uint32_t fetchIndex;
+    std::uint32_t formatComponents = 0;
 };
 
 struct FragmentParameter {
@@ -402,11 +403,21 @@ struct VertexInput {
     std::uint32_t location;
     std::uint32_t components;
     std::uint32_t fetchIndex;
+    std::uint32_t outputMask = 0;
 
     bool operator==(const VertexInput& other) const = default;
 };
 
+struct VertexInputPatch {
+    std::uint32_t location;
+    std::uint32_t word;
+    std::array<std::uint32_t, 3> values;
+
+    bool operator==(const VertexInputPatch& other) const = default;
+};
+
 struct CompiledShaderArtifact {
+    std::vector<VertexInputPatch> vertexInputPatches;
     SharedSpirv spirv;
     std::uint32_t memoryOffsetDword = 0;
     std::uint32_t bdaAbiVersion = 0;

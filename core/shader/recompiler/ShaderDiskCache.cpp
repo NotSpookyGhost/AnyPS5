@@ -287,10 +287,16 @@ void encodeArtifact(Writer& writer, const CompiledShaderArtifact& result) {
     writer.Values(std::span<const std::uint32_t>(result.spirv.Words()));
     writer.Value(result.bdaAbiVersion);
     writer.Value(result.memoryOffsetDword);
+    writer.List(result.vertexInputPatches, [](Writer& out, const VertexInputPatch& patch) {
+        out.Value(patch.location);
+        out.Value(patch.word);
+        for (const auto value : patch.values) out.Value(value);
+    });
     writer.List(result.vertexInputs, [](Writer& out, const VertexInput& attribute) {
         out.Value(attribute.location);
         out.Value(attribute.components);
         out.Value(attribute.fetchIndex);
+        out.Value(attribute.outputMask);
     });
     writer.Value(result.vertexOffsetSgpr);
     writer.Value(result.instanceOffsetSgpr);
@@ -316,10 +322,16 @@ void decodeArtifact(Reader& reader, CompiledShaderArtifact& result) {
     result.spirv = std::move(words);
     reader.Value(result.bdaAbiVersion);
     reader.Value(result.memoryOffsetDword);
-    reader.List(result.vertexInputs, 12, [](Reader& in, VertexInput& attribute) {
+    reader.List(result.vertexInputPatches, 20, [](Reader& in, VertexInputPatch& patch) {
+        in.Value(patch.location);
+        in.Value(patch.word);
+        for (auto& value : patch.values) in.Value(value);
+    });
+    reader.List(result.vertexInputs, 16, [](Reader& in, VertexInput& attribute) {
         in.Value(attribute.location);
         in.Value(attribute.components);
         in.Value(attribute.fetchIndex);
+        in.Value(attribute.outputMask);
     });
     reader.Value(result.vertexOffsetSgpr);
     reader.Value(result.instanceOffsetSgpr);
@@ -352,6 +364,7 @@ void encodeInvocation(Writer& writer, const ShaderInvocation& invocation) {
         out.Value(attribute.components);
         for (const auto field : attribute.resource.fields) out.Value(field);
         out.Value(attribute.fetchIndex);
+        out.Value(attribute.formatComponents);
     });
 }
 
@@ -366,11 +379,12 @@ void decodeInvocation(Reader& reader, ShaderInvocation& invocation) {
     reader.Values(pushConstants);
     invocation.pushConstants.resize(pushConstants.size());
     if (!pushConstants.empty()) std::memcpy(invocation.pushConstants.data(), pushConstants.data(), pushConstants.size());
-    reader.List(invocation.vertexAttributes, 28, [](Reader& in, VertexAttribute& attribute) {
+    reader.List(invocation.vertexAttributes, 32, [](Reader& in, VertexAttribute& attribute) {
         in.Value(attribute.location);
         in.Value(attribute.components);
         for (auto& field : attribute.resource.fields) in.Value(field);
         in.Value(attribute.fetchIndex);
+        in.Value(attribute.formatComponents);
     });
 }
 
@@ -418,6 +432,8 @@ void encodeInfo(Writer& writer, const CompiledShaderInfo& compiled) {
         out.Value(buffer.written);
         out.Value(buffer.atomic);
         out.Value(buffer.formatted);
+        out.Value(buffer.descriptorFormatted);
+        out.Value(buffer.formattedReadMask);
         out.Value(buffer.scalar);
     });
     writer.List(info.images, [](Writer& out, const ImageResource& image) {
@@ -501,7 +517,7 @@ void decodeInfo(Reader& reader, CompiledShaderInfo& compiled) {
     auto& info = compiled.info;
     reader.Value(info.scratchDwords);
     reader.Value(info.sharedMemoryBytes);
-    reader.List(info.buffers, 21, [](Reader& in, BufferResource& buffer) {
+    reader.List(info.buffers, 26, [](Reader& in, BufferResource& buffer) {
         in.Value(buffer.source);
         in.Value(buffer.firstUsePc);
         in.Value(buffer.maxByteExtent);
@@ -510,6 +526,8 @@ void decodeInfo(Reader& reader, CompiledShaderInfo& compiled) {
         in.Value(buffer.written);
         in.Value(buffer.atomic);
         in.Value(buffer.formatted);
+        in.Value(buffer.descriptorFormatted);
+        in.Value(buffer.formattedReadMask);
         in.Value(buffer.scalar);
     });
     reader.List(info.images, 65, [](Reader& in, ImageResource& image) {

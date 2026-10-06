@@ -12,6 +12,7 @@ class TranslationContext {
 public:
     TranslationContext(IrProgram& program, IrBlock& block, std::uint32_t vectorLimit);
 
+    void TranslateEmbeddedFetch(const RdnaInstruction& instruction, std::uint32_t attribute, std::uint32_t components);
     void TranslateInstruction(const RdnaInstruction& instruction);
     void SetPixelInput(const ShaderPixelInputInfo* info, bool barycentricEnabled) { pixelInput = info; fragmentShaderBarycentricEnabled = barycentricEnabled; }
     void AddBranchCondition(const BasicBlock& source, BlockInfo& info);

@@ -38,6 +38,7 @@ IrShaderStage toIrShaderStage(ShaderStageKind stage) {
 }
 
 void validateTranslateOptions(const TranslateOptions& options) {
+    if (options.embeddedFetch != nullptr && options.stage != ShaderStageKind::Vertex && options.stage != ShaderStageKind::Local) throw std::runtime_error("embedded vertex fetch requires a vertex or local shader");
     if (options.userDataBaseRegister >= NumScalarRegs || options.userDataCount > NumScalarRegs - options.userDataBaseRegister) {
         throw std::runtime_error("shader user data exceeds the scalar register bank");
     }
@@ -348,6 +349,14 @@ IrProgram InstructionTranslator::Translate(const RdnaProgram& decoded, const Con
     program.Resources().userDataBase = options.userDataBaseRegister;
     program.Resources().userDataCount = options.userDataCount;
     program.Info().scratchDwords = options.scratchDwords;
+    if (options.embeddedFetch != nullptr) {
+        program.Info().vertexOffsetSgpr = options.embeddedFetch->vertexOffsetSgpr;
+        program.Info().instanceOffsetSgpr = options.embeddedFetch->instanceOffsetSgpr;
+        program.Info().vertexOffsetShared = options.embeddedFetch->vertexOffsetShared;
+        program.Info().instanceOffsetShared = options.embeddedFetch->instanceOffsetShared;
+        program.Info().vertexOffsetConflict = options.embeddedFetch->vertexOffsetConflict;
+        program.Info().instanceOffsetConflict = options.embeddedFetch->instanceOffsetConflict;
+    }
     program.Metadata().cfgFailureKind = cfg.failureKind;
     program.Metadata().failureReason = cfg.unsupportedReason;
 
@@ -405,6 +414,18 @@ IrProgram InstructionTranslator::Translate(const RdnaProgram& decoded, const Con
                 if (table == cfg.codeTableLoads.end()) throw std::runtime_error("missing shader code table values");
                 context.TranslateCodeTableLoad(instruction, *table);
                 continue;
+            }
+            if (options.embeddedFetch != nullptr) {
+                const auto load = std::ranges::find(options.embeddedFetch->loads, instruction.programCounter, &EmbeddedFetchLoad::programCounter);
+                if (load != options.embeddedFetch->loads.end()) {
+                    if (options.inputInfo.vertex == nullptr || instruction.destination.kind != RdnaOperandKind::VectorRegister || instruction.dataDwordCount != load->componentCount) throw std::runtime_error("prepared vertex fetch does not match its instruction");
+                    const auto& vertex = *options.inputInfo.vertex;
+                    std::uint32_t attribute = 0;
+                    while (attribute < static_cast<std::uint32_t>(vertex.resourcesNum) && vertex.resourcesDst[attribute].attrId != load->attributeId) ++attribute;
+                    if (attribute == static_cast<std::uint32_t>(vertex.resourcesNum)) throw std::runtime_error("prepared vertex fetch has no matching semantic");
+                    context.TranslateEmbeddedFetch(instruction, attribute, load->componentCount);
+                    continue;
+                }
             }
             context.TranslateInstruction(instruction);
         }

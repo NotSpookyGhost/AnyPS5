@@ -19,6 +19,7 @@ inline constexpr std::uint32_t BufferWords = 3u;
 inline constexpr std::uint32_t ImageBase = 128u;
 inline constexpr std::uint32_t ImageWords = 5u;
 inline constexpr std::uint32_t VertexBase = 512u;
+inline constexpr std::uint32_t VertexWords = 6u;
 
 }
 

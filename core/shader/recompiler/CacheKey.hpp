@@ -180,11 +180,12 @@ private:
         append(key, value.fetchBufferReg);
         append(key, value.fetchEmbedded);
         if (value.resourcesNum > value.resources.size()) throw std::runtime_error("Shader cache: invalid vertex resource count");
-        if (value.fetchEmbedded) return;
         append(key, value.resourcesNum);
         for (std::uint32_t i = 0; i < value.resourcesNum; ++i) {
-            append(key, VertexInputNumericClass(static_cast<IrBufferFormat>((value.resources[i].fields[3] >> 12u) & 0x7fu)));
-            append(key, value.resourcesDst[i]);
+            if (!value.fetchEmbedded) append(key, VertexInputNumericClass(static_cast<IrBufferFormat>((value.resources[i].fields[3] >> 12u) & 0x7fu)));
+            auto destination = value.resourcesDst[i];
+            if (value.fetchEmbedded) destination.fetchIndex = 0;
+            append(key, destination);
         }
     }
 

@@ -127,6 +127,15 @@ bool TranslationContext::emitInterpolation(const RdnaInstruction& inst) {
     }
 }
 
+void TranslationContext::TranslateEmbeddedFetch(const RdnaInstruction& instruction, std::uint32_t attribute, std::uint32_t components) {
+    if (!instruction.formatted || instruction.typed || components == 0u || components > 4u) throw std::runtime_error("invalid prepared vertex fetch");
+    for (std::uint32_t component = 0; component < components; ++component) {
+        auto& value = ir.Emit(IrOpcode::GetAttribute, IrType::U32, {&ir.Constant(attribute), &ir.Constant(component)});
+        value.SetFlags<std::uint32_t>(1u);
+        writeOperand(offsetOperand(instruction.destination, component), &value);
+    }
+}
+
 void TranslateAttributeInstruction(TranslationContext& context, const RdnaInstruction& instruction) {
     throw std::runtime_error("TranslateAttributeInstruction not implemented");
 }

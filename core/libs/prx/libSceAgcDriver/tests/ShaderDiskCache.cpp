@@ -1,5 +1,6 @@
 #include "ShaderDiskCache.hpp"
 #include "CacheKey.hpp"
+#include "VertexInputSpecialization.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
 #include "ShaderCacheDirectory.hpp"
 #include <algorithm>
@@ -12,6 +13,7 @@
 #include <functional>
 #include <future>
 #include <iostream>
+#include <map>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -54,6 +56,7 @@ void requireSameArtifact(const CompiledShaderArtifact& left, const CompiledShade
     require(left.memoryOffsetDword == right.memoryOffsetDword, prefix + "memory offset differs");
     require(left.hostSubgroupSize == right.hostSubgroupSize, prefix + "host subgroup size differs");
     require(left.vertexInputs == right.vertexInputs, prefix + "vertex inputs differ");
+    require(left.vertexInputPatches == right.vertexInputPatches, prefix + "vertex type patches differ");
     require(left.vertexOffsetSgpr == right.vertexOffsetSgpr && left.instanceOffsetSgpr == right.instanceOffsetSgpr, prefix + "offset SGPRs differ");
     require(left.vertexOffsetShared == right.vertexOffsetShared && left.instanceOffsetShared == right.instanceOffsetShared && left.vertexOffsetConflict == right.vertexOffsetConflict && left.instanceOffsetConflict == right.instanceOffsetConflict, prefix + "offset flags differ");
     require(left.parameterExports == right.parameterExports, prefix + "parameter exports differ");
@@ -70,11 +73,12 @@ void requireSameResult(const RecompileResult& left, const RecompileResult& right
     const std::string prefix = std::string(what) + ": ";
     require(sameBindings(left.bindings, right.bindings), prefix + "bindings differ");
     require(left.pushConstants == right.pushConstants, prefix + "push constants differ");
+    require(left.specialization == right.specialization, prefix + "specialization constants differ");
     require(left.vertexAttributes.size() == right.vertexAttributes.size(), prefix + "vertex attribute count differs");
     for (std::size_t i = 0; i < left.vertexAttributes.size(); ++i) {
         const auto& a = left.vertexAttributes[i];
         const auto& b = right.vertexAttributes[i];
-        require(a.location == b.location && a.components == b.components && a.resource.fields == b.resource.fields && a.fetchIndex == b.fetchIndex, prefix + "vertex attribute differs");
+        require(a.location == b.location && a.components == b.components && a.resource.fields == b.resource.fields && a.fetchIndex == b.fetchIndex && a.formatComponents == b.formatComponents, prefix + "vertex attribute differs");
     }
 }
 
@@ -127,7 +131,11 @@ RecompileResult sampleResult() {
     result.memoryOffsetDword = 7;
     result.hostSubgroupSize = 32;
     result.vertexInputs = {{1, 4, 2}, {5, 2, 0}};
+    result.vertexInputPatches = {{1, 20, {7, 8, 9}}, {5, 40, {10, 11, 12}}};
+    result.specialization = {{512, 4}, {516, 0x3f800000u}, {517, 0}};
     result.vertexAttributes = {{1, 4, {{0x1000u, 0x20000u, 0x30u, 0x4u}}, 2}, {5, 2, {{9u, 8u, 7u, 6u}}, 0}};
+    result.vertexInputs[0].outputMask = 5u;
+    result.vertexAttributes[0].formatComponents = 3u;
     result.vertexOffsetSgpr = 12;
     result.instanceOffsetSgpr = -1;
     result.vertexOffsetShared = true;
@@ -162,6 +170,8 @@ CompiledVariant sampleVariant() {
     buffer.read = true;
     buffer.atomic = true;
     buffer.scalar = true;
+    buffer.descriptorFormatted = true;
+    buffer.formattedReadMask = 5u;
     info.info.buffers = {buffer, BufferResource{}};
     ImageResource image{};
     image.source = 5;
@@ -408,8 +418,12 @@ void verifyKeySensitivity() {
     input.fetchEmbedded = true;
     const auto embeddedKey = vertex.Key();
     input.resources[0].fields = {};
-    input.resourcesNum = 0u;
+    input.resourcesDst[0].fetchIndex = 1u;
     require(vertex.Key() == embeddedKey, "runtime vertex fetch descriptors changed the artifact key");
+    input.resources[0].fields[3] = (20u << 12u) | 0xfacu;
+    require(vertex.Key() == embeddedKey, "embedded numeric class changed the prepared template key");
+    input.resourcesNum = 0u;
+    require(vertex.Key() != embeddedKey, "embedded semantic interface did not change the artifact key");
     SampleRequest fragment;
     fragment.request.shader.stage = ShaderStage::Fragment;
     fragment.request.context.compute.reset();
@@ -633,6 +647,73 @@ void verifyInvocationIsolation() {
     require(rejected, "an unsupported buffer descriptor type was accepted");
 }
 
+void verifyVertexTypeSpecialization() {
+    CompiledShaderArtifact artifact;
+    artifact.vertexInputs = {{0, 4, 0, 1}, {1, 4, 0, 1}};
+    artifact.spirv = std::vector<std::uint32_t>{
+        spv::MagicNumber, 0x00010000u, 0, 28, 0,
+        (2u << 16u) | spv::OpCapability, spv::CapabilityShader,
+        (3u << 16u) | spv::OpMemoryModel, spv::AddressingModelLogical, spv::MemoryModelGLSL450,
+        (7u << 16u) | spv::OpEntryPoint, spv::ExecutionModelVertex, 20, 0x6e69616du, 0, 10, 11,
+        (4u << 16u) | spv::OpDecorate, 10, spv::DecorationLocation, 0,
+        (4u << 16u) | spv::OpDecorate, 11, spv::DecorationLocation, 1,
+        (2u << 16u) | spv::OpTypeVoid, 1,
+        (3u << 16u) | spv::OpTypeFloat, 2, 32,
+        (4u << 16u) | spv::OpTypeInt, 3, 32, 0,
+        (4u << 16u) | spv::OpTypeVector, 4, 2, 4,
+        (4u << 16u) | spv::OpTypePointer, 5, spv::StorageClassInput, 4,
+        (4u << 16u) | spv::OpTypePointer, 6, spv::StorageClassInput, 2,
+        (3u << 16u) | spv::OpTypeFunction, 7, 1,
+        (4u << 16u) | spv::OpConstant, 3, 8, 0,
+        (4u << 16u) | spv::OpVariable, 5, 10, spv::StorageClassInput,
+        (4u << 16u) | spv::OpVariable, 5, 11, spv::StorageClassInput,
+        (5u << 16u) | spv::OpFunction, 1, 20, spv::FunctionControlMaskNone, 7,
+        (2u << 16u) | spv::OpLabel, 21,
+        (5u << 16u) | spv::OpAccessChain, 6, 22, 10, 8,
+        (4u << 16u) | spv::OpLoad, 2, 23, 22,
+        (4u << 16u) | spv::OpBitcast, 3, 24, 23,
+        (5u << 16u) | spv::OpAccessChain, 6, 25, 11, 8,
+        (4u << 16u) | spv::OpLoad, 2, 26, 25,
+        (4u << 16u) | spv::OpBitcast, 3, 27, 26,
+        (1u << 16u) | spv::OpReturn,
+        (1u << 16u) | spv::OpFunctionEnd
+    };
+    PrepareVertexInputSpecialization(artifact);
+    const auto original = artifact.spirv.Words();
+    for (std::uint32_t first = 0; first < 3u; ++first) {
+        for (std::uint32_t second = 0; second < 3u; ++second) {
+            const std::array classes{first, second};
+            const auto specialized = SpecializeVertexInputTypes(artifact, classes);
+            const auto& words = specialized.Words();
+            std::map<std::uint32_t, std::uint32_t> scalarKinds;
+            std::uint32_t checked = 0;
+            for (std::size_t cursor = 5; cursor < words.size(); cursor += words[cursor] >> 16u) {
+                const auto op = static_cast<spv::Op>(words[cursor] & 0xffffu);
+                if (op == spv::OpTypeFloat) scalarKinds.emplace(words[cursor + 1u], 0u);
+                if (op == spv::OpTypeInt) scalarKinds.emplace(words[cursor + 1u], words[cursor + 3u] != 0u ? 1u : 2u);
+                if (op == spv::OpLoad) {
+                    const auto attribute = words[cursor + 2u] == 23u ? 0u : 1u;
+                    require(scalarKinds.at(words[cursor + 1u]) == classes[attribute], "vertex input loaded the wrong numeric type");
+                    ++checked;
+                }
+                if (op == spv::OpBitcast || op == spv::OpCopyObject) {
+                    const auto attribute = words[cursor + 2u] == 24u ? 0u : 1u;
+                    require(op == (classes[attribute] == 2u ? spv::OpCopyObject : spv::OpBitcast), "vertex input did not preserve raw component bits");
+                    ++checked;
+                }
+            }
+            require(checked == 4u, "vertex specialization lost attribute loads");
+            require(artifact.spirv.Words() == original, "vertex specialization mutated the shared template");
+        }
+    }
+    auto invalid = artifact;
+    invalid.vertexInputPatches.front().word = static_cast<std::uint32_t>(original.size());
+    bool rejected = false;
+    try { static_cast<void>(SpecializeVertexInputTypes(invalid, std::array{0u, 0u})); }
+    catch (const std::runtime_error&) { rejected = true; }
+    require(rejected, "out-of-range vertex type patch was accepted");
+}
+
 void verifyDefaultDirectory(const char* self) {
     setEnvironment("ANYPS5_SHADER_CACHE_DIR", "");
     setEnvironment("ANYPS5_NO_SHADER_CACHE", "1");
@@ -664,6 +745,7 @@ int main(int argc, char** argv) {
         verifyEmissionFailureMemo();
         verifyFailureMemoSwitch(argv[0]);
         verifyInvocationIsolation();
+        verifyVertexTypeSpecialization();
         std::error_code error;
         std::filesystem::remove_all(directory, error);
         std::cout << "shader disk cache tests passed\n";
