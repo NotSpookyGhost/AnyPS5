@@ -626,8 +626,9 @@ void verifyInvocationIsolation() {
     const auto restored = Recompile(request.request);
     requireSameResult(first, restored, "restored invocation");
     const auto original = request.userData;
-    const std::array<std::array<std::uint32_t, 4>, 6> descriptors{{
+    const std::array<std::array<std::uint32_t, 4>, 7> descriptors{{
         {original[0] + 0x20000u, original[1], original[2], original[3]},
+        {original[0], original[1] | 1u, original[2], original[3]},
         {original[0], original[1], original[2] / 2u, original[3]},
         {original[0], original[1] | (16u << 16u), original[2], original[3]},
         {original[0], original[1], original[2], 0x31004688u},
@@ -638,6 +639,12 @@ void verifyInvocationIsolation() {
         request.userData = descriptor;
         const auto changed = Recompile(request.request);
         require(changed.cacheHit && first.variantId == changed.variantId, "buffer metadata changed the compiled variant");
+        if ((descriptor[1] & 0xffff0000u) == (original[1] & 0xffff0000u) && descriptor[3] == original[3] && (descriptor[0] != 0u || (descriptor[1] & 0xffffu) != 0u)) {
+            require(first.spirv.data() == changed.spirv.data() && first.PipelineVariantId() == changed.PipelineVariantId(), "buffer address or size rebuilt the specialized module");
+        }
+        ComputeRequest fresh(false);
+        fresh.userData = descriptor;
+        requireSameResult(Recompile(fresh.request), changed, "reused binding plan against fresh compilation");
         const auto repeated = Recompile(request.request);
         require(changed.spirv.data() == repeated.spirv.data() && changed.PipelineVariantId() == repeated.PipelineVariantId(), "buffer specialization did not reuse its module");
     }

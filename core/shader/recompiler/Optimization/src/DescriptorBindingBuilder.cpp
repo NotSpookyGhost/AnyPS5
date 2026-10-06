@@ -189,12 +189,18 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
 }
 
 void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::span<const std::uint8_t> exportMappings) const {
+    auto plan = Prepare(allocation.layout, info, stage, snapshot, exportMappings);
+    Populate(allocation, allocation, plan, info, stage, userDataBase, snapshot, partialThreads);
+    allocation.specialization = std::move(plan.specialization);
+}
+
+DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& layout, const ShaderInfo& info, IrShaderStage stage, const ResourceSnapshot& snapshot, std::span<const std::uint8_t> exportMappings) const {
     if (stage == IrShaderStage::Pixel && exportMappings.size() != 8u) fail("fragment runtime export mappings are missing");
-    const IrBindingLayout& layout = allocation.layout;
     if (info.images.size() > ShaderInfo::MaxImages) fail("runtime image count exceeds the static capacity");
-    std::array<std::uint32_t, ShaderInfo::MaxImages> imageModes{};
+    DescriptorBindingPlan plan;
+    auto& imageModes = plan.imageModes;
+    imageModes.resize(info.images.size());
     for (std::size_t index = 0; index < info.images.size(); ++index) imageModes[index] = ResourceMaterializer::RuntimeImageMode(info.images[index], snapshot.images.at(index), info.runtimeImageModes.at(index));
-    allocation.specialization.clear();
     for (std::uint32_t index = 0; index < info.buffers.size(); ++index) {
         const auto& descriptor = snapshot.buffers.at(index);
         if (descriptor.dwordCount != 4u) fail("buffer specialization requires four descriptor words");
@@ -203,9 +209,9 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
         const bool present = descriptor.dwords[0] != 0u || (descriptor.dwords[1] & 0xffffu) != 0u;
         if (buffer.descriptorFormatted && (format > static_cast<std::uint32_t>(IrBufferFormat::Format32_32_32_32Float) || (present && format == 0u))) fail("buffer specialization has an unsupported format");
         const auto first = PipelineSpecialization::BufferBase + index * PipelineSpecialization::BufferWords;
-        allocation.specialization.push_back({first, descriptor.dwords[1] & 0xffff0000u});
-        allocation.specialization.push_back({first + 1u, descriptor.dwords[3]});
-        allocation.specialization.push_back({first + 2u, present ? 1u : 0u});
+        plan.specialization.push_back({first, descriptor.dwords[1] & 0xffff0000u});
+        plan.specialization.push_back({first + 1u, descriptor.dwords[3]});
+        plan.specialization.push_back({first + 2u, present ? 1u : 0u});
         if (buffer.formattedReadMask != 0u) {
             for (std::uint32_t component = 0; component < 4u; ++component) {
                 if ((buffer.formattedReadMask & (1u << component)) == 0u) continue;
@@ -217,11 +223,11 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
     for (std::uint32_t index = 0; index < info.images.size(); ++index) {
         if (info.images[index].indirectRoot != ImageResource::NoIndirectImage) continue;
         const auto first = PipelineSpecialization::ImageBase + index * PipelineSpecialization::ImageWords;
-        allocation.specialization.push_back({first, imageModes[index]});
-        for (std::uint32_t component = 0; component < 4u; ++component) allocation.specialization.push_back({first + 1u + component, (snapshot.images.at(index).dwords[3] >> (component * 3u)) & 7u});
+        plan.specialization.push_back({first, imageModes[index]});
+        for (std::uint32_t component = 0; component < 4u; ++component) plan.specialization.push_back({first + 1u + component, (snapshot.images.at(index).dwords[3] >> (component * 3u)) & 7u});
     }
     for (std::uint32_t target = 0; target < exportMappings.size(); ++target) {
-        for (std::uint32_t component = 0; component < 4u; ++component) allocation.specialization.push_back({PipelineSpecialization::ExportBase + target * 4u + component, (exportMappings[target] >> (component * 2u)) & 3u});
+        for (std::uint32_t component = 0; component < 4u; ++component) plan.specialization.push_back({PipelineSpecialization::ExportBase + target * 4u + component, (exportMappings[target] >> (component * 2u)) & 3u});
     }
     std::vector<std::uint32_t> samplerModes(info.samplers.size(), 0u);
     const auto samplerMode = [](const ImageResource& image) { return image.numericClass == IrTextureNumericClass::Sint || image.conversionFormat != IrBufferFormat::Invalid || image.depthBits ? 2u : 1u; };
@@ -239,7 +245,7 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
         const auto first = (word >> 12u) & 0xfu;
         const auto last = (word >> 16u) & 0xfu;
         if (last < first || last - first >= RuntimeAbi::StorageHeapCapacity) fail("invalid dynamic storage mip range");
-        allocation.specialization.push_back({PipelineSpecialization::MipCountBase + index, last - first + 1u});
+        plan.specialization.push_back({PipelineSpecialization::MipCountBase + index, last - first + 1u});
     }
     for (std::uint32_t resource = 0; resource < info.images.size(); ++resource) {
         const auto& image = info.images[resource];
@@ -252,10 +258,10 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
             if (mode != imageModes[slot]) fail("indirect image mode numbering disagrees with its root");
             active[mode] = true;
         }
-        for (std::uint32_t mode = 0; mode < modes.size(); ++mode) allocation.specialization.push_back({PipelineSpecialization::ImageModeBase + resource * PipelineSpecialization::ImageModeStride + mode, active[mode] ? 1u : 0u});
+        for (std::uint32_t mode = 0; mode < modes.size(); ++mode) plan.specialization.push_back({PipelineSpecialization::ImageModeBase + resource * PipelineSpecialization::ImageModeStride + mode, active[mode] ? 1u : 0u});
     }
-    std::vector<IrDescriptorBinding> selected;
-    std::vector<std::vector<std::uint32_t>> originalElements;
+    auto& selected = plan.selected;
+    auto& originalElements = plan.originalElements;
     selected.reserve(layout.descriptors.size());
     for (const auto& logical : layout.descriptors) {
         const bool imageHeap = ImageBindingResourceClass(logical.kind) != ImageResourceClass::None;
@@ -279,17 +285,25 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
             } else if (samplerHeap) {
                 active = (samplerModes.at(resource) & (1u << (element & 1u))) != 0u;
             }
-            if (imageHeap || samplerHeap) allocation.specialization.push_back({PipelineSpecialization::DescriptorIndex(static_cast<std::uint32_t>(logical.kind), element), active ? static_cast<std::uint32_t>(compact.resources.size()) : 0u});
+            if (imageHeap || samplerHeap) plan.specialization.push_back({PipelineSpecialization::DescriptorIndex(static_cast<std::uint32_t>(logical.kind), element), active ? static_cast<std::uint32_t>(compact.resources.size()) : 0u});
             if (active) {
                 compact.resources.push_back(resource);
                 originals.push_back(element);
             }
         }
-        if (imageHeap || samplerHeap) allocation.specialization.push_back({PipelineSpecialization::HeapCountBase + static_cast<std::uint32_t>(logical.kind), std::max(1u, static_cast<std::uint32_t>(compact.resources.size()))});
+        if (imageHeap || samplerHeap) plan.specialization.push_back({PipelineSpecialization::HeapCountBase + static_cast<std::uint32_t>(logical.kind), std::max(1u, static_cast<std::uint32_t>(compact.resources.size()))});
         if ((imageHeap || samplerHeap) && compact.resources.empty()) continue;
         selected.push_back(std::move(compact));
         originalElements.push_back(std::move(originals));
     }
+    return plan;
+}
+
+void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const CompiledBindingLayout& compiled, const DescriptorBindingPlan& plan, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads) const {
+    const auto& layout = compiled.layout;
+    const auto& imageModes = plan.imageModes;
+    const auto& selected = plan.selected;
+    const auto& originalElements = plan.originalElements;
     const std::vector<std::uint32_t> shaderData = ShaderDataDwordsFor(layout, info, userDataBase, snapshot, partialThreads, imageModes, selected);
     const UnnormalizedProof unnormalized = ProveUnnormalized(info, snapshot);
     const std::vector<std::uint32_t> samplerElements = SamplerElements(layout, info);

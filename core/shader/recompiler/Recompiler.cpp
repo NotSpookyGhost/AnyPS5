@@ -393,32 +393,14 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     throw;
 }
 
-std::uint64_t specializationId(std::uint64_t artifact, std::span<const PipelineSpecializationConstant> constants) {
-    if (constants.empty()) return 0;
-    std::vector<std::uint64_t> key{artifact};
-    key.reserve(constants.size() + 1u);
-    for (const auto& constant : constants) key.push_back((static_cast<std::uint64_t>(constant.id) << 32u) | constant.value);
-    static std::mutex mutex;
-    static std::map<std::vector<std::uint64_t>, std::uint64_t> variants;
-    std::lock_guard lock(mutex);
-    const auto [entry, inserted] = variants.try_emplace(std::move(key), 0);
-    if (inserted) entry->second = nextVariantId();
-    return entry->second;
-}
-
 struct SpecializedModule {
+    std::uint64_t specializationId = 0;
     SharedSpirv spirv;
     std::vector<std::uint32_t> bindings;
     bool pushData = false;
 };
 
-std::shared_ptr<const SpecializedModule> specializeModule(const CompiledShaderArtifact& artifact, std::span<const std::uint32_t> classes, std::span<const PipelineSpecializationConstant> constants, std::uint64_t id, const SpirvTarget& target) {
-    static std::mutex mutex;
-    static std::map<std::uint64_t, std::shared_ptr<const SpecializedModule>> modules;
-    {
-        std::lock_guard lock(mutex);
-        if (const auto found = modules.find(id); found != modules.end()) return found->second;
-    }
+std::shared_ptr<const SpecializedModule> buildSpecializedModule(const CompiledShaderArtifact& artifact, std::span<const std::uint32_t> classes, std::span<const PipelineSpecializationConstant> constants, const SpirvTarget& target) {
     auto source = SpecializeVertexInputTypes(artifact, classes);
     std::map<std::uint32_t, std::uint32_t> supplied;
     for (const auto& constant : constants) {
@@ -499,21 +481,92 @@ std::shared_ptr<const SpecializedModule> specializeModule(const CompiledShaderAr
         cursor += count;
     }
     module->spirv = std::move(materialized);
-    std::lock_guard lock(mutex);
-    return modules.emplace(id, std::move(module)).first->second;
+    module->specializationId = constants.empty() ? 0u : nextVariantId();
+    return module;
+}
+
+struct SpecializedModuleEntry {
+    std::once_flag ready;
+    std::shared_ptr<const SpecializedModule> module;
+};
+
+struct PreparedBindingPlan {
+    std::once_flag ready;
+    DescriptorBindingPlan bindings;
+    std::shared_mutex mutex;
+    std::map<std::vector<std::uint32_t>, std::shared_ptr<SpecializedModuleEntry>> modules;
+};
+
+std::shared_ptr<PreparedBindingPlan> preparedBindingPlan(const CompiledVariant& variant, const ResourceSnapshot& snapshot, std::span<const std::uint8_t> exports) {
+    struct BindingPlanKeyStorage {};
+    auto& key = HostThreadLocal<std::vector<std::uint64_t>, BindingPlanKeyStorage>();
+    key.clear();
+    key.push_back(variant.artifact.variantId);
+    for (std::size_t index = 0; index < variant.info.info.buffers.size(); ++index) {
+        const auto& descriptor = snapshot.buffers.at(index);
+        key.push_back(descriptor.dwordCount);
+        key.push_back(descriptor.dwords[1] & 0xffff0000u);
+        key.push_back(descriptor.dwords[3]);
+        key.push_back(descriptor.dwords[0] != 0u || (descriptor.dwords[1] & 0xffffu) != 0u);
+    }
+    for (std::size_t index = 0; index < variant.info.info.images.size(); ++index) {
+        const auto& descriptor = snapshot.images.at(index);
+        key.push_back(descriptor.dwordCount);
+        key.push_back(descriptor.dwords[0] != 0u || (descriptor.dwords[1] & 0xffu) != 0u);
+        key.push_back(descriptor.dwords[1] & ~0xffu);
+        for (std::size_t word = 2; word < 8; ++word) key.push_back(descriptor.dwords[word]);
+    }
+    key.push_back(exports.size());
+    for (const auto mapping : exports) key.push_back(mapping);
+    static std::shared_mutex mutex;
+    static std::map<std::vector<std::uint64_t>, std::shared_ptr<PreparedBindingPlan>> plans;
+    std::shared_ptr<PreparedBindingPlan> plan;
+    {
+        std::shared_lock lock(mutex);
+        if (const auto found = plans.find(key); found != plans.end()) plan = found->second;
+    }
+    if (plan == nullptr) {
+        std::unique_lock lock(mutex);
+        const auto found = plans.find(key);
+        plan = found != plans.end() ? found->second : plans.emplace(key, std::make_shared<PreparedBindingPlan>()).first->second;
+    }
+    std::call_once(plan->ready, [&] { plan->bindings = DescriptorBindingBuilder{}.Prepare(variant.bindings.layout, variant.info.info, variant.info.stage, snapshot, exports); });
+    return plan;
+}
+
+std::shared_ptr<const SpecializedModule> specializeModule(const CompiledShaderArtifact& artifact, std::span<const std::uint32_t> classes, std::span<const PipelineSpecializationConstant> constants, const SpirvTarget& target) {
+    struct ModuleKeyStorage {};
+    auto& key = HostThreadLocal<std::vector<std::uint64_t>, ModuleKeyStorage>();
+    key.clear();
+    key.push_back(artifact.variantId);
+    for (const auto& constant : constants) key.push_back((static_cast<std::uint64_t>(constant.id) << 32u) | constant.value);
+    static std::shared_mutex mutex;
+    static std::map<std::vector<std::uint64_t>, std::shared_ptr<SpecializedModuleEntry>> modules;
+    std::shared_ptr<SpecializedModuleEntry> entry;
+    {
+        std::shared_lock lock(mutex);
+        if (const auto found = modules.find(key); found != modules.end()) entry = found->second;
+    }
+    if (entry == nullptr) {
+        std::unique_lock lock(mutex);
+        const auto found = modules.find(key);
+        entry = found != modules.end() ? found->second : modules.emplace(key, std::make_shared<SpecializedModuleEntry>()).first->second;
+    }
+    std::call_once(entry->ready, [&] { entry->module = buildSpecializedModule(artifact, classes, constants, target); });
+    return entry->module;
 }
 
 RecompileResult materializeResult(const CompiledVariant& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot) {
     RecompileResult result;
     static_cast<CompiledShaderArtifact&>(result) = variant.artifact;
+    const auto plan = preparedBindingPlan(variant, snapshot, request.context.pixel ? std::span<const std::uint8_t>(request.context.pixel->targetExportMapping) : std::span<const std::uint8_t>{});
     BindingAllocationResult bindings;
-    bindings.layout = variant.bindings.layout;
-    bindings.pushConstantOffsetBytes = variant.bindings.pushConstantOffsetBytes;
-    bindings.pushConstantSizeBytes = variant.bindings.pushConstantSizeBytes;
-    DescriptorBindingBuilder{}.Populate(bindings, variant.info.info, variant.info.stage, variant.info.userDataBase, snapshot, partialThreads(request), request.context.pixel ? std::span<const std::uint8_t>(request.context.pixel->targetExportMapping) : std::span<const std::uint8_t>{});
+    DescriptorBindingBuilder{}.Populate(bindings, variant.bindings, plan->bindings, variant.info.info, variant.info.stage, variant.info.userDataBase, snapshot, partialThreads(request));
     result.bindings = std::move(bindings.bindings);
-    result.specialization = std::move(bindings.specialization);
-    if (variant.bindings.layout.UsesPushData()) result.specialization.push_back({PipelineSpecialization::PushDataOffset, request.layout.pushConstantOffsetBytes / 4u});
+    struct LocalModuleKeyStorage {};
+    auto& moduleKey = HostThreadLocal<std::vector<std::uint32_t>, LocalModuleKeyStorage>();
+    moduleKey.clear();
+    if (variant.bindings.layout.UsesPushData()) moduleKey.push_back(request.layout.pushConstantOffsetBytes / 4u);
     result.pushConstants = std::move(bindings.pushConstants);
     result.vertexAttributes.reserve(result.vertexInputs.size());
     std::array<std::uint32_t, ShaderVertexStageInfo::MaxResources> vertexClasses{};
@@ -528,22 +581,47 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
             if (numeric == IrTextureNumericClass::Unsupported) throw std::runtime_error("unsupported prepared vertex format");
             const auto kind = numeric == IrTextureNumericClass::Float ? 0u : numeric == IrTextureNumericClass::Sint ? 1u : 2u;
             vertexClasses.at(input.location) = kind;
-            const auto first = PipelineSpecialization::VertexBase + input.location * PipelineSpecialization::VertexWords;
+            std::uint32_t selectors = kind << 12u;
             auto& formatComponents = result.vertexAttributes.back().formatComponents;
             formatComponents = 1u;
             for (std::uint32_t component = 0; component < 4u; ++component) {
                 const auto selector = (input.outputMask & (1u << component)) != 0u ? (resource.fields[3] >> (component * 3u)) & 7u : 0u;
                 if (selector == 2u || selector == 3u) throw std::runtime_error("reserved prepared vertex component selector");
                 if (selector >= 4u) formatComponents = std::max(formatComponents, selector - 3u);
-                result.specialization.push_back({first + component, selector});
+                selectors |= selector << (component * 3u);
             }
-            result.specialization.push_back({first + 4u, kind == 0u ? 0x3f800000u : 1u});
-            result.specialization.push_back({first + 5u, kind});
+            moduleKey.push_back(selectors);
         }
     }
-    result.specializationId = specializationId(result.variantId, result.specialization);
-    if (!result.specialization.empty() || !result.vertexInputPatches.empty()) {
-        const auto module = specializeModule(variant.artifact, vertexClasses, result.specialization, result.PipelineVariantId(), request.target);
+    if (!plan->bindings.specialization.empty() || variant.bindings.layout.UsesPushData() || !result.vertexInputPatches.empty()) {
+        std::shared_ptr<SpecializedModuleEntry> entry;
+        {
+            std::shared_lock lock(plan->mutex);
+            if (const auto found = plan->modules.find(moduleKey); found != plan->modules.end()) entry = found->second;
+        }
+        if (entry == nullptr) {
+            std::unique_lock lock(plan->mutex);
+            const auto found = plan->modules.find(moduleKey);
+            entry = found != plan->modules.end() ? found->second : plan->modules.emplace(moduleKey, std::make_shared<SpecializedModuleEntry>()).first->second;
+        }
+        std::call_once(entry->ready, [&] {
+            auto constants = plan->bindings.specialization;
+            std::size_t index = 0;
+            if (variant.bindings.layout.UsesPushData()) constants.push_back({PipelineSpecialization::PushDataOffset, moduleKey[index++]});
+            if (!result.vertexInputPatches.empty()) {
+                for (const auto& input : result.vertexInputs) {
+                    const auto selectors = moduleKey[index++];
+                    const auto first = PipelineSpecialization::VertexBase + input.location * PipelineSpecialization::VertexWords;
+                    for (std::uint32_t component = 0; component < 4u; ++component) constants.push_back({first + component, (selectors >> (component * 3u)) & 7u});
+                    const auto kind = selectors >> 12u;
+                    constants.push_back({first + 4u, kind == 0u ? 0x3f800000u : 1u});
+                    constants.push_back({first + 5u, kind});
+                }
+            }
+            entry->module = specializeModule(variant.artifact, vertexClasses, constants, request.target);
+        });
+        const auto& module = entry->module;
+        result.specializationId = module->specializationId;
         result.spirv = module->spirv;
         result.specialization.clear();
         result.vertexInputPatches.clear();
