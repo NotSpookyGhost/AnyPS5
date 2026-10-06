@@ -7,6 +7,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "CacheKey.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderPreparation.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ShaderPreparationScope.hpp"
 #include "CompiledVariant.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include <cstdlib>
@@ -570,4 +571,16 @@ void Driver::RegisterShader(const Shader* shader) {
     transaction.Commit();
 }
 
+}
+
+extern "C" AgcDriver::DriverDetail::ShaderPreparationTransaction* AgcDriverBeginShaderPreparation_nid_postfix() {
+    return new AgcDriver::DriverDetail::ShaderPreparationTransaction();
+}
+
+extern "C" void AgcDriverCommitShaderPreparation_nid_postfix(AgcDriver::DriverDetail::ShaderPreparationTransaction* transaction) {
+    transaction->Commit();
+}
+
+extern "C" void AgcDriverEndShaderPreparation_nid_postfix(AgcDriver::DriverDetail::ShaderPreparationTransaction* transaction) noexcept {
+    delete transaction;
 }

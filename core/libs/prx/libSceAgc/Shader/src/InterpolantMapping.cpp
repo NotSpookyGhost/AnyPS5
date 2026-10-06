@@ -7,7 +7,7 @@
 #include <prx/libc/include/General.hpp>
 
 #include "SceShaders.hpp"
-#include "prx/libSceAgcDriver/Execution/include/ShaderPreparation.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ShaderPreparationScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderUtils.hpp"
 #include "prx/libSceAgc/Shader/include/ShaderConstants.hpp"
@@ -61,7 +61,7 @@ int CreateInterpolantMapping(const char* fn, ShaderRegister* regs, const Shader*
         throw std::runtime_error(std::string(fn) + ": input semantic count exceeds 32");
     }
 
-    AgcDriver::DriverDetail::ShaderPreparationTransaction transaction;
+    AgcDriver::ShaderPreparationScope transaction;
     std::array<ShaderRegister, 32> values{};
     auto* output = regs;
     regs = values.data();
