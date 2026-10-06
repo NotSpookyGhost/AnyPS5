@@ -1368,6 +1368,28 @@ void EmitImage(SpirvValueEmitContext& ctx, const IrValue& inst) {
     if (table.slot != 0u) {
         state.runtimeImageMetadata = table.slot;
     }
+    const auto emitMode = [&](const ImageResource& mode) {
+        state.runtimeImage = &mode;
+        if (mode.packedFormat == IrBufferFormat::Fmask8_S2_F1) {
+            if (inst.Opcode() == IrOpcode::ImageRead && memory.dataBits == 32u) {
+                const auto value = state.module.AllocateId();
+                state.module.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4u), value, ConstantU32(state, 0x76543210u), ConstantU32(state, 0xfedcba98u), ConstantU32(state, 0u), ConstantU32(state, 0u));
+                ctx.Define(inst, Select(state, TypeU32Vector(state, 4u), ctx.Arg(inst, 2u), value, ConstantU32CompositeZero(state, 4u)));
+            } else {
+                ctx.Fail(inst, "FMASK requires a 32-bit image read");
+            }
+        } else if (mode.depthBits && memory.dataBits == 16u) {
+            ctx.Fail(inst, "depth bits require a 32-bit image result");
+        } else {
+            EmitImageMode(ctx, inst, mode);
+        }
+    };
+    if (modes.size() == 1u) {
+        emitMode(modes.front());
+        state.runtimeImage = nullptr;
+        state.runtimeImageMetadata = 0u;
+        return;
+    }
     const auto selector = Binary(state, spv::OpShiftRightLogical, TypeU32(state), RuntimeImageDword(state, memory.resource, offsetof(RuntimeAbi::ResourceMetadata, flags) / sizeof(std::uint32_t)), ConstantU32(state, 1u));
     const bool returnsValue = inst.Opcode() != IrOpcode::ImageWrite;
     const auto resultId = returnsValue ? ctx.Result(inst) : 0u;
@@ -1385,21 +1407,7 @@ void EmitImage(SpirvValueEmitContext& ctx, const IrValue& inst) {
     std::vector<std::uint32_t> incoming;
     for (std::uint32_t index = 0u; index < modes.size(); ++index) {
         EmitLabel(state, labels[index]);
-        const auto& mode = modes[index];
-        state.runtimeImage = &mode;
-        if (mode.packedFormat == IrBufferFormat::Fmask8_S2_F1) {
-            if (inst.Opcode() == IrOpcode::ImageRead && memory.dataBits == 32u) {
-                const auto value = state.module.AllocateId();
-                state.module.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4u), value, ConstantU32(state, 0x76543210u), ConstantU32(state, 0xfedcba98u), ConstantU32(state, 0u), ConstantU32(state, 0u));
-                ctx.Define(inst, Select(state, TypeU32Vector(state, 4u), ctx.Arg(inst, 2u), value, ConstantU32CompositeZero(state, 4u)));
-            } else {
-                ctx.Fail(inst, "FMASK requires a 32-bit image read");
-            }
-        } else if (mode.depthBits && memory.dataBits == 16u) {
-            ctx.Fail(inst, "depth bits require a 32-bit image result");
-        } else {
-            EmitImageMode(ctx, inst, mode);
-        }
+        emitMode(modes[index]);
         if (returnsValue) incoming.insert(incoming.end(), {ctx.Def(&inst), state.currentLabel});
         ctx.definitions.erase(&inst);
         state.module.AddFunction(spv::OpBranch, merge);
