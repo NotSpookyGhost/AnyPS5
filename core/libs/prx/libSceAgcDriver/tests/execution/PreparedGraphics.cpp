@@ -27,7 +27,7 @@ void Reject(TAction action, const char* expected) {
         Require(std::string(error.what()).find(expected) != std::string::npos, error.what());
         return;
     }
-    throw std::runtime_error("invalid graphics ABI was accepted");
+    throw std::runtime_error(std::string("invalid graphics ABI was accepted; expected: ") + expected);
 }
 
 struct Fixture {
@@ -144,6 +144,7 @@ void Check(AgcDriver::VulkanDevice& device, AgcDriver::Graphics::ShaderPath path
         Require(front.snapshot->prepared->entries.size() == frontCount && fragment.snapshot->prepared->entries.size() == pixelCount && front.snapshot->prepared->rectangles.empty() && front.snapshot->prepared->fragments.empty() && !front.snapshot->prepared->rectangleRequested, "failed rectangle compilation published part of the stage group");
         for (const bool primitiveFirst : {false, true}) {
             front.snapshot->prepared->rectangles.clear();
+            front.snapshot->prepared->rectangleProgress.clear();
             front.snapshot->prepared->fragments.clear();
             front.snapshot->prepared->rectangleRequested = false;
             if (primitiveFirst) ResolvePreparedGraphics(*front.snapshot, {}, 7, target);
@@ -178,6 +179,7 @@ void Check(AgcDriver::VulkanDevice& device, AgcDriver::Graphics::ShaderPath path
         Require(expired.expired(), "helper link retained a shader snapshot");
         ResolvePreparedGraphics(*front.snapshot, {}, 7, target);
         Require(front.snapshot->prepared->fragments.size() == 1, "expired helper link was not removed");
+        Require(front.snapshot->prepared->rectangleProgress.size() == 1 && !front.snapshot->prepared->rectangleProgress.front().fragment.expired(), "expired rectangle progress was not removed");
     }
     if (!dump.empty()) {
         for (std::size_t index = 0; index < stages.size(); ++index) {
@@ -211,12 +213,14 @@ void Check(AgcDriver::VulkanDevice& device, AgcDriver::Graphics::ShaderPath path
         static_cast<void>(InvocationFor(*program.snapshot, program.codeOffset, request));
         request.layout.pushConstantOffsetBytes = 4;
         request.layout.pushConstantSizeBytes -= 4;
+        static_cast<void>(InvocationFor(*program.snapshot, program.codeOffset, request));
+        request.layout.pushConstantOffsetBytes = 2;
         Reject([&] { static_cast<void>(InvocationFor(*program.snapshot, program.codeOffset, request)); }, "artifact is missing");
         request.layout = {0, 0, 0, mesh ? MeshDrawPushOffsetBytes : 128u};
         if (pixel) request.context.pixel->interpolatorSettings[0] ^= 1u;
         else if (tessellation) ++request.graphics->tessellation->outputControlPoints;
         else if (mesh) ++request.graphics->mesh->maxVertices;
-        else request.context.userDataBaseRegister = 0;
+        else ++request.context.userDataBaseRegister;
         Reject([&] { static_cast<void>(InvocationFor(*program.snapshot, program.codeOffset, request)); }, "artifact is missing");
     }
     ShaderRegistry invalidRegistry;
