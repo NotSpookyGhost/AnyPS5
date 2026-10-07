@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -138,7 +139,96 @@ std::vector<std::uint32_t> GuestSamplersDescriptor(const std::vector<std::uint32
     return result;
 }
 
-std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, const ShaderInfo& info, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::span<const std::uint32_t> imageModes, const std::vector<IrDescriptorBinding>& selected) {
+constexpr std::uint32_t ForceUnnormalizedBit = 1u << 15u;
+
+[[noreturn]] void failUnnormalized(const char* reason) {
+    fail(std::string("DescriptorBindingBuilder::Populate unnormalized guest sampler ") + reason + ", which is not implemented");
+}
+
+const char* UnnormalizedUseReason(std::uint32_t uses) {
+    switch (uses & (~uses + 1u)) {
+        case SamplerUseImplicitLod: return "is used by an implicit-LOD sample";
+        case SamplerUseGradient: return "is used by a sample with derivatives";
+        case SamplerUseOffset: return "is used with a texel offset";
+        case SamplerUseCompare: return "is used with depth comparison";
+        case SamplerUseGather: return "is used by a gather";
+        case SamplerUseQueryLod: return "is used by image_get_lod";
+        default: return "is used by an image_sample_*_a variant";
+    }
+}
+
+struct UnnormalizedProof {
+    std::vector<bool> samplers;
+    std::vector<bool> images;
+};
+
+UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapshot& snapshot) {
+    UnnormalizedProof proof{std::vector<bool>(info.samplers.size()), std::vector<bool>(info.images.size())};
+    for (std::uint32_t r = 0; r < info.samplers.size(); r++) {
+        if ((GuestSamplersDescriptor({r}, snapshot)[0] & ForceUnnormalizedBit) == 0u) {
+            continue;
+        }
+        const auto& sampler = info.samplers[r];
+        const std::uint32_t unsupported = sampler.uses & ~static_cast<std::uint32_t>(SamplerUseExplicitLod);
+        if (unsupported != 0u) {
+            failUnnormalized(UnnormalizedUseReason(unsupported));
+        }
+        if (sampler.depthCompare) {
+            failUnnormalized("is used with depth comparison");
+        }
+        for (const auto& pair : info.sampledPairs) {
+            if (pair.sampler != r) {
+                continue;
+            }
+            const auto& image = info.images.at(pair.image);
+            if (image.indirectRoot != ImageResource::NoIndirectImage) {
+                failUnnormalized("samples an image selected at run time");
+            }
+            if ((image.dimension != RdnaImageDimension::Dim1D && image.dimension != RdnaImageDimension::Dim2D) || image.cube) {
+                failUnnormalized("samples a 1D-array, 2D-array, 3D, cube or multisampled image");
+            }
+            if (image.depthCompare) {
+                failUnnormalized("is used with depth comparison");
+            }
+            if (image.conversionFormat != IrBufferFormat::Invalid || image.packed) {
+                failUnnormalized("samples an image that needs a format conversion or packed access");
+            }
+            proof.images[pair.image] = true;
+        }
+        proof.samplers[r] = true;
+    }
+    return proof;
+}
+
+std::vector<std::uint32_t> SamplerElements(const IrBindingLayout& layout, const ShaderInfo& info) {
+    std::vector<std::uint32_t> elements(info.samplers.size(), ShaderInfo::MaxSamplers);
+    for (const IrDescriptorBinding& logical : layout.descriptors) {
+        if (logical.kind != DescriptorBindingKind::Samplers) {
+            continue;
+        }
+        for (std::uint32_t element = 0; element < logical.resources.size() && element < ShaderInfo::MaxSamplers; element++) {
+            elements.at(logical.resources[element]) = element;
+        }
+    }
+    return elements;
+}
+
+std::uint32_t ImageSamplerMask(const ShaderInfo& info, const std::vector<std::uint32_t>& samplerElements, std::uint32_t resource) {
+    const std::uint32_t root = info.images.at(resource).indirectRoot;
+    std::uint32_t mask = 0;
+    for (const SampledResourcePair& pair : info.sampledPairs) {
+        if (pair.image != resource && pair.image != root) {
+            continue;
+        }
+        if (pair.sampler >= samplerElements.size() || samplerElements[pair.sampler] >= ShaderInfo::MaxSamplers) {
+            fail("DescriptorBindingBuilder::Populate sampled image pair names a sampler outside the first " + std::to_string(ShaderInfo::MaxSamplers) + " elements of the sampler binding");
+        }
+        mask |= 1u << samplerElements[pair.sampler];
+    }
+    return mask;
+}
+
+std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, const std::vector<PreparedImageMetadata>& imageMetadata) {
     std::vector<std::uint32_t> result(layout.ShaderDataDwords(), 0u);
     for (std::size_t i = 0; i < layout.userDataRegisters.size(); ++i) {
         const auto reg = layout.userDataRegisters[i];
@@ -149,26 +239,12 @@ std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, co
         if (partialThreads == std::array<std::uint32_t, 3>{}) fail("partial-group shader has no dispatch size");
         std::copy(partialThreads.begin(), partialThreads.end(), result.begin() + layout.DispatchThreadLimitDword());
     }
-    if (layout.runtimeImageCount == 0u) return result;
-    for (const auto& binding : selected) {
-        if (ImageBindingResourceClass(binding.kind) == ImageResourceClass::None) continue;
-        for (std::size_t element = 0; element < binding.resources.size(); ++element) {
-            const auto resource = binding.resources[element];
-            if (info.images.at(resource).indirectRoot == ImageResource::NoIndirectImage) continue;
-            const auto& mode = info.runtimeImageModes.at(resource).at(imageModes[resource]);
-            if (DescriptorBindingForImage(mode) != binding.kind) continue;
-            RuntimeAbi::ResourceMetadata metadata{};
-            metadata.binding = static_cast<std::uint32_t>(binding.kind);
-            metadata.firstElement = static_cast<std::uint32_t>(element);
-            metadata.elementCount = 1u;
-            const auto& descriptor = snapshot.images.at(resource);
-            if (descriptor.dwordCount != metadata.descriptor.size()) fail("invalid runtime image descriptor width");
-            std::copy_n(descriptor.dwords.begin(), metadata.descriptor.size(), metadata.descriptor.begin());
-            metadata.flags = imageModes[resource] << 1u;
-            if (descriptor.dwords[0] == 0u && (descriptor.dwords[1] & 0xffu) == 0u) metadata.flags |= 1u;
-            if (resource >= layout.runtimeImageCount) fail("runtime image metadata exceeds compact layout");
-            std::memcpy(result.data() + layout.ImageMetadataDword() + resource * (sizeof(metadata) / sizeof(std::uint32_t)), &metadata, sizeof(metadata));
-        }
+    for (const auto& entry : imageMetadata) {
+        auto metadata = entry.metadata;
+        const auto& descriptor = snapshot.images.at(entry.resource);
+        if (descriptor.dwordCount != metadata.descriptor.size()) fail("invalid runtime image descriptor width");
+        std::copy_n(descriptor.dwords.begin(), metadata.descriptor.size(), metadata.descriptor.begin());
+        std::memcpy(result.data() + entry.offset, &metadata, sizeof(metadata));
     }
     return result;
 }
@@ -190,7 +266,7 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
 
 void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::span<const std::uint8_t> exportMappings) const {
     auto plan = Prepare(allocation.layout, info, stage, snapshot, exportMappings);
-    Populate(allocation, allocation, plan, info, stage, userDataBase, snapshot, partialThreads);
+    Populate(allocation, allocation, plan, userDataBase, snapshot, partialThreads);
     allocation.specialization = std::move(plan.specialization);
 }
 
@@ -198,8 +274,7 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
     if (stage == IrShaderStage::Pixel && exportMappings.size() != 8u) fail("fragment runtime export mappings are missing");
     if (info.images.size() > ShaderInfo::MaxImages) fail("runtime image count exceeds the static capacity");
     DescriptorBindingPlan plan;
-    auto& imageModes = plan.imageModes;
-    imageModes.resize(info.images.size());
+    std::vector<std::uint32_t> imageModes(info.images.size());
     for (std::size_t index = 0; index < info.images.size(); ++index) imageModes[index] = ResourceMaterializer::RuntimeImageMode(info.images[index], snapshot.images.at(index), info.runtimeImageModes.at(index));
     for (std::uint32_t index = 0; index < info.buffers.size(); ++index) {
         const auto& descriptor = snapshot.buffers.at(index);
@@ -260,9 +335,7 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
         }
         for (std::uint32_t mode = 0; mode < modes.size(); ++mode) plan.specialization.push_back({PipelineSpecialization::ImageModeBase + resource * PipelineSpecialization::ImageModeStride + mode, active[mode] ? 1u : 0u});
     }
-    auto& selected = plan.selected;
-    auto& originalElements = plan.originalElements;
-    selected.reserve(layout.descriptors.size());
+    plan.bindings.reserve(layout.descriptors.size());
     for (const auto& logical : layout.descriptors) {
         const bool imageHeap = ImageBindingResourceClass(logical.kind) != ImageResourceClass::None;
         const bool samplerHeap = logical.kind == DescriptorBindingKind::Samplers;
@@ -293,89 +366,107 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
         }
         if (imageHeap || samplerHeap) plan.specialization.push_back({PipelineSpecialization::HeapCountBase + static_cast<std::uint32_t>(logical.kind), std::max(1u, static_cast<std::uint32_t>(compact.resources.size()))});
         if ((imageHeap || samplerHeap) && compact.resources.empty()) continue;
-        selected.push_back(std::move(compact));
-        originalElements.push_back(std::move(originals));
+        PreparedDescriptorBinding entry{};
+        auto& physical = entry.descriptor;
+        physical.descriptorSet = RuntimeAbi::DescriptorSet;
+        physical.binding = NativeBinding(stage, compact.kind);
+        physical.count = compact.resources.empty() ? 1u : static_cast<std::uint32_t>(compact.resources.size());
+        physical.kind = PhysicalKindFor(compact.kind);
+        physical.role = RoleFor(compact.kind);
+        if (physical.role == DescriptorRole::GuestBuffers) {
+            for (const auto resource : compact.resources) {
+                const auto& buffer = info.buffers.at(resource);
+                physical.bufferAtomic.push_back(buffer.atomic);
+                physical.bufferWritten.push_back(buffer.written || buffer.atomic);
+                if (buffer.written || buffer.atomic) ++entry.writtenBuffers;
+                else ++entry.readOnlyBuffers;
+            }
+        } else if (physical.role == DescriptorRole::GuestImages) {
+            const auto& modes = info.runtimeImageModes.at(compact.resources.front());
+            const auto shape = std::ranges::find_if(modes, [&](const ImageResource& mode) { return DescriptorBindingForImage(mode) == compact.kind; });
+            if (shape == modes.end()) fail("runtime image heap has no static image type");
+            physical.imageShape = ImageShapeForResource(*shape);
+            for (std::size_t element = 0; element < compact.resources.size(); ++element) {
+                const auto resource = compact.resources[element];
+                const auto& image = info.images.at(resource);
+                const auto& mode = info.runtimeImageModes.at(resource).at(imageModes[resource]);
+                entry.identityImageSwizzle.push_back(mode.conversionFormat != IrBufferFormat::Invalid || mode.depthBits);
+                physical.imageWritten.push_back(image.written || image.atomic);
+                physical.imageDepthCompare.push_back(image.depthCompare);
+                physical.imageAtomic64.push_back(image.atomic64);
+                if (layout.runtimeImageCount == 0u || image.indirectRoot == ImageResource::NoIndirectImage) continue;
+                if (resource >= layout.runtimeImageCount) fail("runtime image metadata exceeds compact layout");
+                const auto& descriptor = snapshot.images.at(resource);
+                RuntimeAbi::ResourceMetadata metadata{};
+                if (descriptor.dwordCount != metadata.descriptor.size()) fail("invalid runtime image descriptor width");
+                metadata.binding = static_cast<std::uint32_t>(compact.kind);
+                metadata.firstElement = static_cast<std::uint32_t>(element);
+                metadata.elementCount = 1u;
+                metadata.flags = imageModes[resource] << 1u;
+                if (descriptor.dwords[0] == 0u && (descriptor.dwords[1] & 0xffu) == 0u) metadata.flags |= 1u;
+                const auto offset = layout.ImageMetadataDword() + resource * static_cast<std::uint32_t>(sizeof(metadata) / sizeof(std::uint32_t));
+                plan.imageMetadata.push_back({resource, offset, metadata});
+            }
+        } else if (physical.role == DescriptorRole::GuestSamplers) {
+            for (std::uint32_t element = 0; element < compact.resources.size(); ++element) {
+                physical.samplerDepthCompare.push_back(info.samplers.at(compact.resources[element]).depthCompare);
+                if ((originals[element] & 1u) != 0u) entry.samplerFilterElements.push_back(element);
+            }
+        } else if (physical.role == DescriptorRole::ShaderData && layout.UsesPushData()) {
+            fail("DescriptorBindingBuilder::Populate shader-data binding must not exist when push data is used");
+        }
+        plan.storageData |= physical.role == DescriptorRole::ShaderData;
+        entry.resources = std::move(compact.resources);
+        plan.bindings.push_back(std::move(entry));
     }
     return plan;
 }
 
-void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const CompiledBindingLayout& compiled, const DescriptorBindingPlan& plan, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads) const {
-    const auto& layout = compiled.layout;
-    const auto& imageModes = plan.imageModes;
-    const auto& selected = plan.selected;
-    const auto& originalElements = plan.originalElements;
-    const std::vector<std::uint32_t> shaderData = ShaderDataDwordsFor(layout, info, userDataBase, snapshot, partialThreads, imageModes, selected);
-    const UnnormalizedProof unnormalized = ProveUnnormalized(info, snapshot);
-    const std::vector<std::uint32_t> samplerElements = SamplerElements(layout, info);
+DescriptorBindingPlan DescriptorBindingBuilder::Select(const DescriptorBindingPlan& plan, std::span<const std::uint32_t> bindings) const {
+    DescriptorBindingPlan selected;
+    std::set<std::uint32_t> remaining(bindings.begin(), bindings.end());
+    selected.bindings.reserve(remaining.size());
+    for (const auto& binding : plan.bindings) {
+        if (remaining.erase(binding.descriptor.binding) == 0u) continue;
+        selected.storageData |= binding.descriptor.role == DescriptorRole::ShaderData;
+        selected.bindings.push_back(binding);
+    }
+    if (!remaining.empty()) fail("specialized module bindings disagree with the prepared plan");
+    selected.imageMetadata = plan.imageMetadata;
+    return selected;
+}
 
+void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const CompiledBindingLayout& compiled, const DescriptorBindingPlan& plan, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads) const {
+    const auto& layout = compiled.layout;
+    const bool needsShaderData = layout.UsesPushData() || plan.storageData;
+    auto shaderData = needsShaderData ? ShaderDataDwordsFor(layout, userDataBase, snapshot, partialThreads, plan.imageMetadata) : std::vector<std::uint32_t>{};
     std::vector<DescriptorBinding> bindings;
-    bindings.reserve(layout.descriptors.size());
+    bindings.reserve(plan.bindings.size());
     std::size_t writtenHere = 0;
     std::size_t readOnlyHere = 0;
-    for (std::size_t bindingIndex = 0; bindingIndex < selected.size(); ++bindingIndex) {
-        const auto& logical = selected[bindingIndex];
-        DescriptorBinding physical;
-        physical.descriptorSet = RuntimeAbi::DescriptorSet;
-        physical.binding = NativeBinding(stage, logical.kind);
-        physical.count = logical.resources.empty() ? 1u : static_cast<std::uint32_t>(logical.resources.size());
-        physical.kind = PhysicalKindFor(logical.kind);
-        physical.role = RoleFor(logical.kind);
-        physical.readOnly = false;
-
+    for (const auto& entry : plan.bindings) {
+        auto physical = entry.descriptor;
         switch (physical.role) {
         case DescriptorRole::GuestBuffers:
-            physical.guestDescriptor = GuestBuffersDescriptor(logical.resources, snapshot);
-            for (const std::uint32_t resource : logical.resources) {
-                const auto& buffer = info.buffers.at(resource);
-                physical.bufferAtomic.push_back(buffer.atomic);
-                // The tracker merges every buffer access of a source into its resource
-                // (ResourceTracker::Merge), so an element without a store or atomic is read-only
-                // over its whole extent; stores through pointers (BDA) never bind a V#.
-                physical.bufferWritten.push_back(buffer.written || buffer.atomic);
-                if (buffer.written || buffer.atomic) ++writtenHere;
-                else ++readOnlyHere;
+            physical.guestDescriptor = GuestBuffersDescriptor(entry.resources, snapshot);
+            writtenHere += entry.writtenBuffers;
+            readOnlyHere += entry.readOnlyBuffers;
+            break;
+        case DescriptorRole::GuestImages:
+            physical.guestDescriptor.reserve(entry.resources.size() * 8u);
+            for (std::size_t element = 0; element < entry.resources.size(); ++element) {
+                const auto& descriptor = snapshot.images.at(entry.resources[element]);
+                if (descriptor.dwordCount != 8u) fail("invalid runtime image descriptor width");
+                const auto offset = physical.guestDescriptor.size();
+                physical.guestDescriptor.insert(physical.guestDescriptor.end(), descriptor.dwords.begin(), descriptor.dwords.begin() + 8);
+                if (entry.identityImageSwizzle[element]) physical.guestDescriptor[offset + 3u] = (physical.guestDescriptor[offset + 3u] & ~0xfffu) | ShaderImageIdentitySwizzle;
             }
             break;
-        case DescriptorRole::GuestImages: {
-            const auto& modes = info.runtimeImageModes.at(logical.resources.front());
-            const auto shape = std::ranges::find_if(modes, [&](const ImageResource& mode) { return DescriptorBindingForImage(mode) == logical.kind; });
-            if (shape == modes.end()) fail("runtime image heap has no static image type");
-            physical.imageShape = ImageShapeForResource(*shape);
-            std::uint32_t previous = UINT32_MAX;
-            std::uint32_t mip = 0u;
-            for (const std::uint32_t resource : logical.resources) {
-                const auto& image = info.images.at(resource);
-                const auto& descriptor = snapshot.images.at(resource);
-                const auto& mode = info.runtimeImageModes.at(resource).at(imageModes[resource]);
-                mip = resource == previous ? mip + 1u : 0u;
-                previous = resource;
-                const auto firstMip = (descriptor.dwords[3] >> 12u) & 0xfu;
-                const auto lastMip = (descriptor.dwords[3] >> 16u) & 0xfu;
-                const bool active = DescriptorBindingForImage(mode) == logical.kind && mode.packedFormat != IrBufferFormat::Fmask8_S2_F1 && (image.mipMode != ImageMipMode::DynamicStorage || mip <= lastMip - firstMip);
-                for (std::uint32_t dword = 0u; dword < 8u; ++dword) {
-                    auto value = descriptor.dwords[dword];
-                    if (dword == 3u && (mode.conversionFormat != IrBufferFormat::Invalid || mode.depthBits)) value = (value & ~0xfffu) | ShaderImageIdentitySwizzle;
-                    physical.guestDescriptor.push_back(active ? value : 0u);
-                }
-                physical.imageWritten.push_back(image.written || image.atomic);
-                physical.imageDepthCompare.push_back(image.depthCompare);
-                physical.imageAtomic.push_back(image.atomic);
-                physical.imageAtomic64.push_back(image.atomic64);
-                physical.imageUnnormalized.push_back(unnormalized.images.at(resource));
-                physical.imageSamplers.push_back(ImageSamplerMask(info, samplerElements, resource));
-            }
-            break;
-        }
         case DescriptorRole::GuestSamplers:
-            physical.guestDescriptor = GuestSamplersDescriptor(logical.resources, snapshot);
-            for (std::size_t element = 0; element < logical.resources.size(); ++element) {
-                const auto& sampler = info.samplers.at(logical.resources[element]);
-                physical.samplerDepthCompare.push_back(sampler.depthCompare);
-                physical.samplerUnnormalized.push_back(unnormalized.samplers.at(logical.resources[element]));
-                if ((originalElements[bindingIndex][element] & 1u) != 0u) {
-                    auto& filter = physical.guestDescriptor.at(element * 4u + 2u);
-                    filter = PointFilteredSamplerWord(physical.guestDescriptor.at(element * 4u), filter);
-                }
+            physical.guestDescriptor = GuestSamplersDescriptor(entry.resources, snapshot);
+            for (const auto element : entry.samplerFilterElements) {
+                auto& filter = physical.guestDescriptor.at(element * 4u + 2u);
+                filter = PointFilteredSamplerWord(physical.guestDescriptor.at(element * 4u), filter);
             }
             break;
         case DescriptorRole::FlattenedSrt:
@@ -385,10 +476,7 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
             physical.guestDescriptor = snapshot.flattenedSrt;
             break;
         case DescriptorRole::ShaderData:
-            if (layout.UsesPushData()) {
-                fail("DescriptorBindingBuilder::Populate shader-data binding must not exist when push data is used");
-            }
-            physical.guestDescriptor = shaderData;
+            physical.guestDescriptor = std::move(shaderData);
             break;
         case DescriptorRole::Gds:
         case DescriptorRole::BdaPagetable:

@@ -490,11 +490,17 @@ struct SpecializedModuleEntry {
     std::shared_ptr<const SpecializedModule> module;
 };
 
+struct PreparedModuleEntry {
+    std::once_flag ready;
+    std::shared_ptr<const SpecializedModule> module;
+    DescriptorBindingPlan bindings;
+};
+
 struct PreparedBindingPlan {
     std::once_flag ready;
     DescriptorBindingPlan bindings;
     std::shared_mutex mutex;
-    std::map<std::vector<std::uint32_t>, std::shared_ptr<SpecializedModuleEntry>> modules;
+    std::map<std::vector<std::uint32_t>, std::shared_ptr<PreparedModuleEntry>> modules;
 };
 
 std::shared_ptr<PreparedBindingPlan> preparedBindingPlan(const CompiledVariant& variant, const ResourceSnapshot& snapshot, std::span<const std::uint8_t> exports) {
@@ -558,16 +564,34 @@ std::shared_ptr<const SpecializedModule> specializeModule(const CompiledShaderAr
 
 RecompileResult materializeResult(const CompiledVariant& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot) {
     RecompileResult result;
-    static_cast<CompiledShaderArtifact&>(result) = variant.artifact;
+    const auto& artifact = variant.artifact;
+    static_cast<CompiledShaderArtifact&>(result) = {
+        .memoryOffsetDword = artifact.memoryOffsetDword,
+        .shaderDataDwords = artifact.shaderDataDwords,
+        .imageMetadataDword = artifact.imageMetadataDword,
+        .runtimeImageCount = artifact.runtimeImageCount,
+        .runtimeImageResources = artifact.runtimeImageResources,
+        .bdaAbiVersion = artifact.bdaAbiVersion,
+        .runtimeAbiVersion = artifact.runtimeAbiVersion,
+        .vertexInputs = artifact.vertexInputs,
+        .vertexOffsetSgpr = artifact.vertexOffsetSgpr,
+        .instanceOffsetSgpr = artifact.instanceOffsetSgpr,
+        .vertexOffsetShared = artifact.vertexOffsetShared,
+        .instanceOffsetShared = artifact.instanceOffsetShared,
+        .vertexOffsetConflict = artifact.vertexOffsetConflict,
+        .instanceOffsetConflict = artifact.instanceOffsetConflict,
+        .hostSubgroupSize = artifact.hostSubgroupSize,
+        .parameterExports = artifact.parameterExports,
+        .fragmentParameters = artifact.fragmentParameters,
+        .variantId = artifact.variantId
+    };
     const auto plan = preparedBindingPlan(variant, snapshot, request.context.pixel ? std::span<const std::uint8_t>(request.context.pixel->targetExportMapping) : std::span<const std::uint8_t>{});
-    BindingAllocationResult bindings;
-    DescriptorBindingBuilder{}.Populate(bindings, variant.bindings, plan->bindings, variant.info.info, variant.info.stage, variant.info.userDataBase, snapshot, partialThreads(request));
-    result.bindings = std::move(bindings.bindings);
+    const DescriptorBindingPlan* bindingPlan = &plan->bindings;
+    std::shared_ptr<PreparedModuleEntry> entry;
     struct LocalModuleKeyStorage {};
     auto& moduleKey = HostThreadLocal<std::vector<std::uint32_t>, LocalModuleKeyStorage>();
     moduleKey.clear();
     if (variant.bindings.layout.UsesPushData()) moduleKey.push_back(request.layout.pushConstantOffsetBytes / 4u);
-    result.pushConstants = std::move(bindings.pushConstants);
     result.vertexAttributes.reserve(result.vertexInputs.size());
     std::array<std::uint32_t, ShaderVertexStageInfo::MaxResources> vertexClasses{};
     for (const auto& input : result.vertexInputs) {
@@ -576,7 +600,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         const auto& resource = vertex.resources[input.location];
         const auto fetchIndex = vertex.fetchEmbedded ? vertex.resourcesDst[input.location].fetchIndex : input.fetchIndex;
         result.vertexAttributes.push_back({input.location, input.components, resource, fetchIndex});
-        if (!result.vertexInputPatches.empty()) {
+        if (!artifact.vertexInputPatches.empty()) {
             const auto numeric = VertexInputNumericClass(static_cast<IrBufferFormat>((resource.fields[3] >> 12u) & 0x7fu));
             if (numeric == IrTextureNumericClass::Unsupported) throw std::runtime_error("unsupported prepared vertex format");
             const auto kind = numeric == IrTextureNumericClass::Float ? 0u : numeric == IrTextureNumericClass::Sint ? 1u : 2u;
@@ -593,8 +617,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
             moduleKey.push_back(selectors);
         }
     }
-    if (!plan->bindings.specialization.empty() || variant.bindings.layout.UsesPushData() || !result.vertexInputPatches.empty()) {
-        std::shared_ptr<SpecializedModuleEntry> entry;
+    if (!plan->bindings.specialization.empty() || variant.bindings.layout.UsesPushData() || !artifact.vertexInputPatches.empty()) {
         {
             std::shared_lock lock(plan->mutex);
             if (const auto found = plan->modules.find(moduleKey); found != plan->modules.end()) entry = found->second;
@@ -602,13 +625,13 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         if (entry == nullptr) {
             std::unique_lock lock(plan->mutex);
             const auto found = plan->modules.find(moduleKey);
-            entry = found != plan->modules.end() ? found->second : plan->modules.emplace(moduleKey, std::make_shared<SpecializedModuleEntry>()).first->second;
+            entry = found != plan->modules.end() ? found->second : plan->modules.emplace(moduleKey, std::make_shared<PreparedModuleEntry>()).first->second;
         }
         std::call_once(entry->ready, [&] {
             auto constants = plan->bindings.specialization;
             std::size_t index = 0;
             if (variant.bindings.layout.UsesPushData()) constants.push_back({PipelineSpecialization::PushDataOffset, moduleKey[index++]});
-            if (!result.vertexInputPatches.empty()) {
+            if (!artifact.vertexInputPatches.empty()) {
                 for (const auto& input : result.vertexInputs) {
                     const auto selectors = moduleKey[index++];
                     const auto first = PipelineSpecialization::VertexBase + input.location * PipelineSpecialization::VertexWords;
@@ -618,16 +641,23 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
                     constants.push_back({first + 5u, kind});
                 }
             }
-            entry->module = specializeModule(variant.artifact, vertexClasses, constants, request.target);
+            const auto module = specializeModule(variant.artifact, vertexClasses, constants, request.target);
+            if (variant.bindings.layout.UsesPushData() && !module->pushData) throw std::runtime_error("specialization removed the prepared push constant interface");
+            auto selected = DescriptorBindingBuilder{}.Select(plan->bindings, module->bindings);
+            entry->bindings = std::move(selected);
+            entry->module = module;
         });
         const auto& module = entry->module;
         result.specializationId = module->specializationId;
         result.spirv = module->spirv;
-        result.specialization.clear();
-        result.vertexInputPatches.clear();
-        std::erase_if(result.bindings, [&](const auto& binding) { return std::ranges::find(module->bindings, binding.binding) == module->bindings.end(); });
-        if (!result.pushConstants.empty() && !module->pushData) throw std::runtime_error("specialization removed the prepared push constant interface");
+        bindingPlan = &entry->bindings;
+    } else {
+        result.spirv = artifact.spirv;
     }
+    BindingAllocationResult bindings;
+    DescriptorBindingBuilder{}.Populate(bindings, variant.bindings, *bindingPlan, variant.info.userDataBase, snapshot, partialThreads(request));
+    result.bindings = std::move(bindings.bindings);
+    result.pushConstants = std::move(bindings.pushConstants);
     return result;
 }
 

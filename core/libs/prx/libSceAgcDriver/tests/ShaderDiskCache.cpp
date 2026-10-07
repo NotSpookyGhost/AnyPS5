@@ -3,6 +3,7 @@
 #include "VertexInputSpecialization.hpp"
 #include "SpirvBackend/SpirvSpecialization.hpp"
 #include "Optimization/ResourceMaterializer.hpp"
+#include "Optimization/DescriptorBindingBuilder.hpp"
 #include "ShaderCacheDirectory.hpp"
 #include <algorithm>
 #include <array>
@@ -656,6 +657,53 @@ void verifyInvocationIsolation() {
     require(rejected, "an unsupported buffer descriptor type was accepted");
 }
 
+void verifyBindingPlanSelection() {
+    ShaderInfo info{};
+    info.buffers.resize(2);
+    info.buffers[0].atomic = true;
+    info.buffers[1].read = true;
+    CompiledBindingLayout compiled{};
+    compiled.layout.descriptors = {{DescriptorBindingKind::Buffers, {0, 1}}, {DescriptorBindingKind::FlattenedSrt, {}}, {DescriptorBindingKind::ShaderData, {}}, {DescriptorBindingKind::Gds, {}}};
+    compiled.layout.userDataRegisters = {0};
+    compiled.layout.memoryOffsetDword = 1;
+    ResourceSnapshot snapshot{};
+    snapshot.buffers.resize(2);
+    for (auto& buffer : snapshot.buffers) {
+        buffer.dwordCount = 4u;
+        buffer.dwords = {0x10000000u, 0u, 64u, 0x31016facu};
+    }
+    snapshot.userData = {17u};
+    snapshot.flattenedSrt = {23u};
+    const DescriptorBindingBuilder builder;
+    const auto plan = builder.Prepare(compiled.layout, info, IrShaderStage::Compute, snapshot);
+    BindingAllocationResult full;
+    builder.Populate(full, compiled, plan, 0u, snapshot, {});
+    require(full.bindings.size() == 4u, "binding plan lost a descriptor before module selection");
+    require(full.bindings[0].bufferAtomic == std::vector<bool>{true, false} && full.bindings[0].bufferWritten == std::vector<bool>{true, false}, "binding plan lost buffer access metadata");
+    const std::array liveBindings{full.bindings[0].binding, full.bindings[0].binding, full.bindings[3].binding};
+    const auto selected = builder.Select(plan, liveBindings);
+    snapshot.userData.clear();
+    snapshot.flattenedSrt.clear();
+    snapshot.buffers[0].dwords[0] += 0x10000u;
+    snapshot.buffers[1].dwords[2] = 128u;
+    BindingAllocationResult populated;
+    builder.Populate(populated, compiled, selected, 0u, snapshot, {});
+    require(populated.bindings.size() == 2u && populated.pushConstants.empty(), "module selection retained an unused descriptor");
+    auto expected = full.bindings[0];
+    expected.guestDescriptor[0] += 0x10000u;
+    expected.guestDescriptor[6] = 128u;
+    require(sameBinding(expected, populated.bindings[0]) && sameBinding(full.bindings[3], populated.bindings[1]), "selected plan changed binding order or reused stale buffer data");
+    bool rejected = false;
+    try { static_cast<void>(builder.Select(plan, std::array{UINT32_MAX})); }
+    catch (const std::runtime_error&) { rejected = true; }
+    require(rejected, "module selection accepted an unknown binding");
+    snapshot.buffers[0].dwordCount = 3u;
+    rejected = false;
+    try { builder.Populate(populated, compiled, selected, 0u, snapshot, {}); }
+    catch (const std::runtime_error&) { rejected = true; }
+    require(rejected, "selected plan accepted an invalid live buffer descriptor");
+}
+
 void verifyVertexTypeSpecialization() {
     CompiledShaderArtifact artifact;
     artifact.vertexInputs = {{0, 4, 0, 1}, {1, 4, 0, 1}};
@@ -817,6 +865,7 @@ int main(int argc, char** argv) {
         verifyEmissionFailureMemo();
         verifyFailureMemoSwitch(argv[0]);
         verifyInvocationIsolation();
+        verifyBindingPlanSelection();
         verifyVertexTypeSpecialization();
         verifyBuiltinSpecialization();
         std::error_code error;
