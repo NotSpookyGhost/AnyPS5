@@ -55,6 +55,7 @@ void Run(AgcDriver::VulkanDevice& device, bool integer) {
     auto other = state.color;
     other.address = reinterpret_cast<std::uintptr_t>(otherPixels.data());
     other.slot = 3;
+    other.exportIndex = 3;
     state.colors = {state.color, other};
     state.hasColorTarget = true;
     state.renderExtent = {Extent, Extent};

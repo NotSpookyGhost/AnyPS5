@@ -77,7 +77,7 @@ void Run(AgcDriver::VulkanDevice& device) {
         const auto vertex = ShaderRecompiler::Recompile(request);
         Require(vertex.vertexInputs.empty() && vertex.vertexAttributes.empty(), "runtime vertex fetch created Vulkan vertex attributes");
         Require(vertex.vertexOffsetSgpr == -1 && vertex.instanceOffsetSgpr == -1, "runtime vertex fetch requested draw offset folding");
-        Require(vertex.bdaAbiVersion != 0u, "runtime vertex fetch has no BDA ABI");
+        Require(vertex.runtimeAbiVersion == ShaderRecompiler::RuntimeAbi::Version, "runtime vertex fetch has an incompatible runtime ABI");
         if (first.spirv.empty()) first = vertex;
         else Require(vertex.cacheHit && vertex.variantId == first.variantId, "runtime vertex descriptor changed the artifact");
         const auto pushBytes = static_cast<std::uint32_t>(vertex.pushConstants.size());
