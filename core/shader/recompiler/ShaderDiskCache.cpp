@@ -416,7 +416,7 @@ void decodeLayout(Reader& reader, IrBindingLayout& layout) {
     reader.Value(layout.dispatchThreadLimit);
     reader.Value(layout.runtimeImageCount);
     reader.Values(layout.userDataRegisters);
-    reader.List(layout.descriptors, static_cast<std::size_t>(RuntimeAbi::Binding::Count), [](Reader& in, IrDescriptorBinding& descriptor) {
+    reader.List(layout.descriptors, 12, [](Reader& in, IrDescriptorBinding& descriptor) {
         in.Value(descriptor.kind);
         in.Values(descriptor.resources);
     });
