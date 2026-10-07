@@ -169,6 +169,13 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
         decoded.packedFormat = format;
     }
     decoded.conversionFormat = RemapTextureFormat(format) != format ? format : IrBufferFormat::Invalid;
+    if (format == IrBufferFormat::Format11_11_10UNorm) {
+        if (!base.srgbDecodeCompatible) throw std::runtime_error("sampling, gathering or querying LOD of a converted unorm image is not implemented");
+        if (!base.depthBitsCompatible) throw std::runtime_error("reads or writes a converted unorm image with 16-bit data, which is not implemented");
+        for (std::uint32_t component = 0; component < 4u; ++component) {
+            if (((descriptorImageSwizzle(descriptor) >> (component * 3u)) & 7u) == 7u) throw std::runtime_error("selects a channel the converted image format does not have");
+        }
+    }
     decoded.srgbDecode = !storage && (srgbDecodeFormats & SrgbDecodeBit(format)) != 0u;
     if (decoded.srgbDecode && !base.srgbDecodeCompatible) {
         throw std::runtime_error("samples or gathers an sRGB image the device cannot sample, which is not implemented");
@@ -586,7 +593,13 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
         mode.cube = false;
         mode.mipCount = mode.mipMode == ImageMipMode::DynamicStorage ? RuntimeAbi::StorageHeapCapacity : 1u;
         mode.shaderSwizzle = ShaderImageIdentitySwizzle;
+        if (conversion == IrBufferFormat::Format11_11_10UNorm) mode.shaderSwizzle = 0x2acu;
         modes.push_back(mode);
+        if (image.dimension == RdnaImageDimension::Dim1DArray || image.dimension == RdnaImageDimension::Dim2DArray || image.dimension == RdnaImageDimension::Dim2DMsaaArray) {
+            auto plain = mode;
+            plain.dimension = image.dimension == RdnaImageDimension::Dim1DArray ? RdnaImageDimension::Dim1D : image.dimension == RdnaImageDimension::Dim2DArray ? RdnaImageDimension::Dim2D : RdnaImageDimension::Dim2DMsaa;
+            modes.push_back(plain);
+        }
         if (image.dimension == RdnaImageDimension::Dim2DArray) {
             mode.cube = true;
             modes.push_back(mode);
@@ -615,6 +628,7 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
             append(IrTextureNumericClass::Uint, IrBufferFormat::Invalid, IrBufferFormat::Invalid, false, false);
             if (!storage) append(IrTextureNumericClass::Sint, IrBufferFormat::Invalid, IrBufferFormat::Invalid, false, false);
             append(IrTextureNumericClass::Uint, IrBufferFormat::Format11_11_10UInt, IrBufferFormat::Invalid, false, false);
+            if (image.srgbDecodeCompatible && image.depthBitsCompatible) append(IrTextureNumericClass::Uint, IrBufferFormat::Format11_11_10UNorm, IrBufferFormat::Invalid, false, false);
             if (!storage) {
                 if (image.depthBitsCompatible) {
                     append(IrTextureNumericClass::Float, IrBufferFormat::Invalid, IrBufferFormat::Invalid, true, false);
@@ -684,6 +698,7 @@ std::uint32_t ResourceMaterializer::RuntimeImageMode(const ImageResource& image,
         }
         if (mode.numericClass == decoded.numericClass && mode.dimension == decoded.dimension && mode.conversionFormat == decoded.conversionFormat && mode.packedFormat == decoded.packedFormat && mode.cube == decoded.cube && mode.depthBits == decoded.depthBits && mode.depthUnorm16 == decoded.depthUnorm16 && mode.srgbDecode == decoded.srgbDecode) return index;
     }
+    if (image.dimension == RdnaImageDimension::Dim1D && decoded.dimension != RdnaImageDimension::Dim1D) throw std::runtime_error("image address has too few coordinate components");
     throw std::runtime_error("image descriptor is incompatible with the static runtime image interface");
 }
 
