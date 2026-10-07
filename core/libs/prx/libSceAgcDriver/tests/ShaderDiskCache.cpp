@@ -793,6 +793,8 @@ void verifyBuiltinSpecialization() {
     emit(spv::OpConstantComposite, {4u, 30u, 6u, 7u, 8u, 9u});
     emit(spv::OpTypePointer, {32u, spv::StorageClassPrivate, 4u});
     emit(spv::OpVariable, {32u, 31u, spv::StorageClassPrivate});
+    emit(spv::OpTypePointer, {33u, spv::StorageClassPrivate, 3u});
+    emit(spv::OpVariable, {33u, 34u, spv::StorageClassPrivate});
     emit(spv::OpFunction, {1u, 10u, spv::FunctionControlMaskNone, 5u});
     emit(spv::OpLabel, {11u});
     emit(spv::OpBitFieldUExtract, {3u, 12u, 9u, 7u, 7u});
@@ -805,6 +807,7 @@ void verifyBuiltinSpecialization() {
     emit(spv::OpBranch, {16u});
     emit(spv::OpLabel, {16u});
     emit(spv::OpPhi, {3u, 18u, 7u, 14u, 17u, 15u});
+    emit(spv::OpStore, {34u, 18u});
     emit(spv::OpIEqual, {2u, 19u, 18u, 7u});
     emit(spv::OpSelectionMerge, {22u, spv::SelectionControlMaskNone});
     emit(spv::OpBranchConditional, {19u, 20u, 21u});
@@ -823,15 +826,19 @@ void verifyBuiltinSpecialization() {
     emit(spv::OpFunctionEnd, {});
     const auto specialized = SpecializeSpirv(words);
     bool identity = false;
-    bool correctPhi = false;
+    std::uint32_t phiValue = 0u;
     for (std::size_t cursor = 5; cursor < specialized.size();) {
         const auto count = specialized[cursor] >> 16u;
         require(count != 0u && count <= specialized.size() - cursor, "builtin specialization produced a truncated instruction");
         const auto op = static_cast<spv::Op>(specialized[cursor] & 0xffffu);
         require(op != spv::OpSwitch && op != spv::OpBranchConditional && op != spv::OpPhi && op != spv::OpVectorExtractDynamic, "builtin specialization retained constant control flow or dynamic exports");
         if (op == spv::OpStore && specialized[cursor + 1u] == 31u) identity = specialized[cursor + 2u] == 30u;
-        if (op == spv::OpConstant && specialized[cursor + 2u] == 18u) correctPhi = specialized[cursor + 3u] == 1u;
+        if (op == spv::OpStore && specialized[cursor + 1u] == 34u) phiValue = specialized[cursor + 2u];
         cursor += count;
+    }
+    bool correctPhi = false;
+    for (std::size_t cursor = 5; cursor < specialized.size(); cursor += specialized[cursor] >> 16u) {
+        if ((specialized[cursor] & 0xffffu) == spv::OpConstant && specialized[cursor + 2u] == phiValue) correctPhi = specialized[cursor + 3u] == 1u;
     }
     require(identity && correctPhi, "builtin specialization selected the wrong export or phi value");
     require(SpecializeSpirv(specialized) == specialized, "builtin specialization is not stable");

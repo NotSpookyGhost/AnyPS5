@@ -514,7 +514,7 @@ void verifyDescriptorPhis() {
         const auto capture = memory.Capture(request);
         request.context.memory = memory.Regions();
         const auto compiled = Recompile(request, *capture);
-        require(countOps(compiled->spirv, OpImageSampleExplicitLod) == 2u * ResourceMaterializer::RuntimeImageModes(plan->info.images.front()).size(), "descriptor Phi: the SPIR-V does not sample once per runtime mode and edge");
+        require(countOps(compiled->spirv, OpImageSampleExplicitLod) == 2u, "descriptor Phi: the specialized SPIR-V does not sample once per edge");
 #if ANYPS5_ENABLE_SPIRV_TOOLS
         static_cast<void>(ValidateAndOptimizeSpirv(compiled->spirv, request.target.vulkanVersion, request.target.spirvVersion));
 #endif
@@ -544,7 +544,7 @@ void verifyDescriptorPhis() {
     AgcDriver::ShaderMemory twoLaneMemory({});
     const auto twoLaneCapture = twoLaneMemory.Capture(twoLane);
     twoLane.context.memory = twoLaneMemory.Regions();
-    require(countOps(Recompile(twoLane, *twoLaneCapture)->spirv, OpImageSampleExplicitLod) == 4u * ResourceMaterializer::RuntimeImageModes(GetResourcePlan(twoLane)->info.images.front()).size(), "descriptor Phi: the two-lane SPIR-V does not sample once per runtime mode, edge and half");
+    require(countOps(Recompile(twoLane, *twoLaneCapture)->spirv, OpImageSampleExplicitLod) == 4u, "descriptor Phi: the specialized two-lane SPIR-V does not sample once per edge and half");
 
     auto dynamic = makeRequest(dynamicCode);
     expectFailure([&] { static_cast<void>(GetResourcePlan(dynamic)); }, "GetSamplerResource dword 0 is not a valid runtime value", "descriptor Phi: an edge without an SRT slot was accepted");
@@ -783,7 +783,7 @@ void verifyPixelRequestSerialization() {
             auto changed = request;
             changed.context.pixel->targetExportMapping[i] ^= 1u;
             RecompileCacheKey::Build(changed, replayKey);
-            require(key != replayKey && RecompileCacheKey::ContextHash(request) != RecompileCacheKey::ContextHash(changed), "shader identity ignored a pixel export mapping");
+            require(key == replayKey && RecompileCacheKey::ContextHash(request) == RecompileCacheKey::ContextHash(changed), "runtime pixel export mapping changed the static shader identity");
         }
     }
     request.context.pixel.reset();
@@ -1240,7 +1240,8 @@ void verifyUnusedUnnormalizedSampler() {
     ResourceSnapshot snapshot;
     snapshot.images = {DescriptorValue{{0x00001000u, 0x03800000u, 0x0000c000u, 0x90000facu, 0u, 0u, 0u, 0u}, 8u}};
     snapshot.samplers = {DescriptorValue{{0x00008092u, 0x00fff000u, 0x05500000u, 0u}, 4u}};
-    const auto populate = [&](const ShaderInfo& shader) {
+    const auto populate = [&](ShaderInfo shader) {
+        shader.runtimeImageModes = {ResourceMaterializer::RuntimeImageModes(shader.images[0])};
         BindingAllocationResult allocation;
         allocation.layout.descriptors = {{DescriptorBindingForImage(shader.images[0]), {0u}}, {DescriptorBindingKind::Samplers, {0u}}};
         DescriptorBindingBuilder{}.Populate(allocation, shader, IrShaderStage::Compute, 0u, snapshot, {});

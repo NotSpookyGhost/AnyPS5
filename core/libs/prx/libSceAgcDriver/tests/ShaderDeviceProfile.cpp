@@ -114,7 +114,7 @@ void CheckAbi() {
             Require(bindings.insert(BindingNumber(static_cast<Stage>(stage), static_cast<Binding>(binding))).second, "runtime ABI bindings overlap");
         }
     }
-    Require(BindingNumber(Stage::Main, Binding::ShaderData) == 55u && BindingNumber(Stage::Fragment, Binding::ShaderData) == 111u, "runtime ABI binding numbers changed");
+    Require(BindingNumber(Stage::Main, Binding::ShaderData) == 62u && BindingNumber(Stage::Fragment, Binding::ShaderData) == 125u, "runtime ABI binding numbers changed");
     Reject([] { BindingNumber(static_cast<Stage>(4u), Binding::Buffers); }, "invalid stage or binding");
     Reject([] { BindingNumber(Stage::Main, Binding::Count); }, "invalid stage or binding");
     Reject([] { ShaderRecompiler::RuntimeAbi::RequireVersion(0u); }, "incompatible version");
@@ -149,13 +149,14 @@ void CheckHeaps() {
     Reject([&] { allocate(image, 0u, RuntimeAbi::SamplerHeapCapacity / 2u + 1u); }, "sampler pairs");
     const std::array dimensions{RdnaImageDimension::Dim1D, RdnaImageDimension::Dim1DArray, RdnaImageDimension::Dim2D, RdnaImageDimension::Dim2DArray, RdnaImageDimension::Dim3D, RdnaImageDimension::Dim2DMsaa, RdnaImageDimension::Dim2DMsaaArray};
     std::set<std::uint32_t> classes;
-    for (std::uint32_t group = 0u; group < 7u; ++group) {
+    for (std::uint32_t group = 0u; group < 8u; ++group) {
         for (const auto dimension : dimensions) {
             image = {};
             image.resourceClass = group < 4u ? ImageResourceClass::Sampled : ImageResourceClass::Storage;
             image.numericClass = group == 1u || group >= 5u ? IrTextureNumericClass::Uint : group == 2u ? IrTextureNumericClass::Sint : IrTextureNumericClass::Float;
             image.depthCompare = group == 3u;
-            image.atomic = group == 6u;
+            image.atomic = group >= 6u;
+            image.atomic64 = group == 7u;
             image.dimension = dimension;
             const auto binding = DescriptorBindingForImage(image);
             Require(classes.insert(static_cast<std::uint32_t>(binding)).second, "typed image classes overlap");
