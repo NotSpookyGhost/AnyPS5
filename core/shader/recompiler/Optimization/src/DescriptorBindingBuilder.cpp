@@ -165,7 +165,8 @@ struct UnnormalizedProof {
 UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapshot& snapshot) {
     UnnormalizedProof proof{std::vector<bool>(info.samplers.size()), std::vector<bool>(info.images.size())};
     for (std::uint32_t r = 0; r < info.samplers.size(); r++) {
-        if ((GuestSamplersDescriptor({r}, snapshot)[0] & ForceUnnormalizedBit) == 0u) {
+        if (snapshot.samplers.at(r).dwordCount != 4u) fail("sampler descriptor must contain four dwords");
+        if ((snapshot.samplers[r].dwords[0] & ForceUnnormalizedBit) == 0u) {
             continue;
         }
         const auto& sampler = info.samplers[r];
@@ -180,7 +181,8 @@ UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapsh
             if (pair.sampler != r) {
                 continue;
             }
-            const auto& image = info.images.at(pair.image);
+            const auto& base = info.images.at(pair.image);
+            const auto& image = info.runtimeImageModes.at(pair.image).at(ResourceMaterializer::RuntimeImageMode(base, snapshot.images.at(pair.image), info.runtimeImageModes.at(pair.image)));
             if (image.indirectRoot != ImageResource::NoIndirectImage) {
                 failUnnormalized("samples an image selected at run time");
             }
@@ -198,34 +200,6 @@ UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapsh
         proof.samplers[r] = true;
     }
     return proof;
-}
-
-std::vector<std::uint32_t> SamplerElements(const IrBindingLayout& layout, const ShaderInfo& info) {
-    std::vector<std::uint32_t> elements(info.samplers.size(), ShaderInfo::MaxSamplers);
-    for (const IrDescriptorBinding& logical : layout.descriptors) {
-        if (logical.kind != DescriptorBindingKind::Samplers) {
-            continue;
-        }
-        for (std::uint32_t element = 0; element < logical.resources.size() && element < ShaderInfo::MaxSamplers; element++) {
-            elements.at(logical.resources[element]) = element;
-        }
-    }
-    return elements;
-}
-
-std::uint32_t ImageSamplerMask(const ShaderInfo& info, const std::vector<std::uint32_t>& samplerElements, std::uint32_t resource) {
-    const std::uint32_t root = info.images.at(resource).indirectRoot;
-    std::uint32_t mask = 0;
-    for (const SampledResourcePair& pair : info.sampledPairs) {
-        if (pair.image != resource && pair.image != root) {
-            continue;
-        }
-        if (pair.sampler >= samplerElements.size() || samplerElements[pair.sampler] >= ShaderInfo::MaxSamplers) {
-            fail("DescriptorBindingBuilder::Populate sampled image pair names a sampler outside the first " + std::to_string(ShaderInfo::MaxSamplers) + " elements of the sampler binding");
-        }
-        mask |= 1u << samplerElements[pair.sampler];
-    }
-    return mask;
 }
 
 std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, const std::vector<PreparedImageMetadata>& imageMetadata) {
@@ -274,6 +248,15 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
     if (stage == IrShaderStage::Pixel && exportMappings.size() != 8u) fail("fragment runtime export mappings are missing");
     if (info.images.size() > ShaderInfo::MaxImages) fail("runtime image count exceeds the static capacity");
     DescriptorBindingPlan plan;
+    const auto unnormalized = ProveUnnormalized(info, snapshot);
+    std::vector<std::uint32_t> compareStates(info.images.size());
+    for (std::uint32_t index = 0; index < info.images.size(); ++index) {
+        if (!info.images[index].depthCompare) continue;
+        const auto compare = compareStates[index] = ResourceMaterializer::EmulatedCompareState(info, snapshot, index);
+        const auto first = PipelineSpecialization::CompareBase + index * PipelineSpecialization::CompareWords;
+        const std::array<std::uint32_t, 6> values{EmulatedCompare::Function(compare), (compare & EmulatedCompare::Linear) != 0u, EmulatedCompare::AddressX(compare), EmulatedCompare::AddressY(compare), EmulatedCompare::Reference(compare), (compare & EmulatedCompare::BorderWhite) != 0u};
+        for (std::uint32_t word = 0; word < values.size(); ++word) plan.specialization.push_back({first + word, values[word]});
+    }
     std::vector<std::uint32_t> imageModes(info.images.size());
     for (std::size_t index = 0; index < info.images.size(); ++index) imageModes[index] = ResourceMaterializer::RuntimeImageMode(info.images[index], snapshot.images.at(index), info.runtimeImageModes.at(index));
     for (std::uint32_t index = 0; index < info.buffers.size(); ++index) {
@@ -392,7 +375,10 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
                 const auto& mode = info.runtimeImageModes.at(resource).at(imageModes[resource]);
                 entry.identityImageSwizzle.push_back(mode.conversionFormat != IrBufferFormat::Invalid || mode.depthBits);
                 physical.imageWritten.push_back(image.written || image.atomic);
-                physical.imageDepthCompare.push_back(image.depthCompare);
+                physical.imageDepthCompare.push_back(mode.depthCompare);
+                physical.imageAtomic.push_back(image.atomic);
+                physical.imageUnnormalized.push_back(unnormalized.images.at(resource));
+                physical.imageSamplers.push_back(0u);
                 physical.imageAtomic64.push_back(image.atomic64);
                 if (layout.runtimeImageCount == 0u || image.indirectRoot == ImageResource::NoIndirectImage) continue;
                 if (resource >= layout.runtimeImageCount) fail("runtime image metadata exceeds compact layout");
@@ -409,7 +395,11 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
             }
         } else if (physical.role == DescriptorRole::GuestSamplers) {
             for (std::uint32_t element = 0; element < compact.resources.size(); ++element) {
-                physical.samplerDepthCompare.push_back(info.samplers.at(compact.resources[element]).depthCompare);
+                const auto resource = compact.resources[element];
+                bool compare = false;
+                for (const auto& pair : info.sampledPairs) if (pair.sampler == resource) compare |= info.images.at(pair.image).depthCompare && compareStates.at(pair.image) == 0u;
+                physical.samplerDepthCompare.push_back(compare);
+                physical.samplerUnnormalized.push_back(unnormalized.samplers.at(resource));
                 if ((originals[element] & 1u) != 0u) entry.samplerFilterElements.push_back(element);
             }
         } else if (physical.role == DescriptorRole::ShaderData && layout.UsesPushData()) {
@@ -418,6 +408,21 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
         plan.storageData |= physical.role == DescriptorRole::ShaderData;
         entry.resources = std::move(compact.resources);
         plan.bindings.push_back(std::move(entry));
+    }
+    std::vector<std::uint32_t> samplerMasks(info.samplers.size());
+    for (const auto& binding : plan.bindings) {
+        if (binding.descriptor.role != DescriptorRole::GuestSamplers) continue;
+        if (binding.resources.size() > ShaderInfo::MaxSamplers) fail("prepared sampler mask capacity exceeded");
+        for (std::uint32_t element = 0; element < binding.resources.size(); ++element) samplerMasks.at(binding.resources[element]) |= 1u << element;
+    }
+    for (auto& binding : plan.bindings) {
+        if (binding.descriptor.role != DescriptorRole::GuestImages) continue;
+        for (std::size_t element = 0; element < binding.resources.size(); ++element) {
+            const auto resource = binding.resources[element];
+            for (const auto& pair : info.sampledPairs) {
+                if (pair.image == resource || pair.image == info.images.at(resource).indirectRoot) binding.descriptor.imageSamplers[element] |= samplerMasks.at(pair.sampler);
+            }
+        }
     }
     return plan;
 }

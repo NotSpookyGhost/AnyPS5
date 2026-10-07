@@ -497,6 +497,8 @@ std::uint32_t emulatedCompareState(const ShaderInfo& info, const ResourceSnapsho
     if (!image.depthCompare || descriptor.dwordCount != 8u || nullImageDescriptor(descriptor)) return 0u;
     const auto format = rawImageFormat(descriptor);
     if (format == IrBufferFormat::Format32Float || format == IrBufferFormat::Format16UNorm || IsDepthBitsTexture(descriptor.dwords[1], descriptor.dwords[3])) return 0u;
+    if (image.indirectRoot != ImageResource::NoIndirectImage || (image.emulatedCompare & EmulatedCompare::Unsupported) != 0u) throw std::runtime_error("unsupported color comparison image instructions");
+    if ((image.emulatedCompare & EmulatedCompare::RequiresSingleLevel) != 0u && ((descriptor.dwords[3] >> 12u) & 0xfu) != ((descriptor.dwords[3] >> 16u) & 0xfu)) throw std::runtime_error("color comparison requires a single mip level");
     const auto reference = colorCompareReference(format);
     const auto type = rawImageType(descriptor);
     if (type != ImageType::Color2D && type != ImageType::Color2DArray) throw std::runtime_error("comparison sampling of a color texture is implemented only for 2D and 2D array views");
@@ -593,7 +595,7 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
             const auto format = static_cast<IrBufferFormat>(value);
             const auto info = GetFormatInfo(format);
             if (info.packedBitfield || info.componentCount == 0u || (storage && info.byteSize == 12u)) continue;
-            const auto numeric = storage && format == IrBufferFormat::Format32SInt ? IrTextureNumericClass::Uint : SampledTextureNumericClass(format);
+            const auto numeric = storage && (format == IrBufferFormat::Format32SInt || format == IrBufferFormat::Format32_32SInt || format == IrBufferFormat::Format32_32_32_32SInt) ? IrTextureNumericClass::Uint : SampledTextureNumericClass(format);
             bool supported = numeric != IrTextureNumericClass::Unsupported && (!storage || numeric != IrTextureNumericClass::Sint);
             for (std::uint32_t component = 0u; component < info.componentCount; ++component) {
                 const auto bits = info.componentBits[component];
@@ -618,6 +620,34 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
             }
         }
     }
+    if (storage && image.depthBitsCompatible && !image.packed && !image.atomic64 && ((image.written && !image.read) || image.atomic)) {
+        constexpr std::array formats{IrBufferFormat::Format32SInt, IrBufferFormat::Format32_32SInt, IrBufferFormat::Format32_32_32_32SInt, IrBufferFormat::Format16SInt, IrBufferFormat::Format8_8SInt, IrBufferFormat::Format16_16SInt, IrBufferFormat::Format8_8_8_8SInt, IrBufferFormat::Format16_16_16_16SInt};
+        for (const auto format : formats) {
+            if (image.atomic && format != IrBufferFormat::Format32SInt) continue;
+            append(IrTextureNumericClass::Uint, format, IrBufferFormat::Invalid, false, false);
+        }
+    }
+    if (image.depthCompare && image.indirectRoot == ImageResource::NoIndirectImage && (image.emulatedCompare & EmulatedCompare::Unsupported) == 0u && (image.dimension == RdnaImageDimension::Dim2D || image.dimension == RdnaImageDimension::Dim2DArray)) {
+        auto mode = image;
+        mode.numericClass = IrTextureNumericClass::Float;
+        mode.depthCompare = false;
+        mode.cube = false;
+        mode.emulatedCompare |= EmulatedCompare::Enabled;
+        mode.conversionFormat = IrBufferFormat::Invalid;
+        mode.packedFormat = IrBufferFormat::Invalid;
+        mode.shaderSwizzle = ShaderImageIdentitySwizzle;
+        modes.push_back(mode);
+    }
+    if (image.srgbDecodeFormats != 0u && image.srgbDecodeCompatible && !storage && !image.depthCompare && !image.packed) {
+        const auto count = modes.size();
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto& base = modes[index];
+            if (base.numericClass != IrTextureNumericClass::Float || base.conversionFormat != IrBufferFormat::Invalid || base.packedFormat != IrBufferFormat::Invalid || base.depthBits) continue;
+            auto mode = base;
+            mode.srgbDecode = true;
+            modes.push_back(mode);
+        }
+    }
     if (modes.empty()) throw std::runtime_error("image instruction has no supported runtime modes");
     return modes;
 }
@@ -626,7 +656,9 @@ std::uint32_t ResourceMaterializer::RuntimeImageMode(const ImageResource& image,
     if (descriptor.dwordCount != 8u) throw std::runtime_error("runtime image descriptor must contain eight dwords");
     if (modes.empty()) throw std::runtime_error("prepared runtime image modes are missing");
     if (nullImageDescriptor(descriptor)) return 0u;
-    const auto decoded = decodeImageDescriptor(descriptor, image);
+    const auto decoded = decodeImageDescriptor(descriptor, image, image.srgbDecodeFormats);
+    const auto format = rawImageFormat(descriptor);
+    const bool emulated = image.depthCompare && format != IrBufferFormat::Format32Float && format != IrBufferFormat::Format16UNorm && !IsDepthBitsTexture(descriptor.dwords[1], descriptor.dwords[3]);
     if (image.packed && decoded.packedFormat != IrBufferFormat::Invalid) {
         const auto format = GetFormatInfo(decoded.packedFormat);
         if (format.packedBitfield) throw std::runtime_error("runtime packed image accesses a bitfield format");
@@ -641,11 +673,12 @@ std::uint32_t ResourceMaterializer::RuntimeImageMode(const ImageResource& image,
     if (decoded.mipCount > (image.mipMode == ImageMipMode::DynamicStorage ? RuntimeAbi::StorageHeapCapacity : 1u)) throw std::runtime_error("runtime storage image mip capacity exceeded");
     for (std::uint32_t index = 0u; index < modes.size(); ++index) {
         const auto& mode = modes[index];
+        if (((mode.emulatedCompare & EmulatedCompare::Enabled) != 0u) != emulated) continue;
         if (decoded.fmask) {
             if (mode.packedFormat == IrBufferFormat::Fmask8_S2_F1) return index;
             continue;
         }
-        if (mode.numericClass == decoded.numericClass && mode.dimension == decoded.dimension && mode.conversionFormat == decoded.conversionFormat && mode.packedFormat == decoded.packedFormat && mode.cube == decoded.cube && mode.depthBits == decoded.depthBits && mode.depthUnorm16 == decoded.depthUnorm16) return index;
+        if (mode.numericClass == decoded.numericClass && mode.dimension == decoded.dimension && mode.conversionFormat == decoded.conversionFormat && mode.packedFormat == decoded.packedFormat && mode.cube == decoded.cube && mode.depthBits == decoded.depthBits && mode.depthUnorm16 == decoded.depthUnorm16 && mode.srgbDecode == decoded.srgbDecode) return index;
     }
     throw std::runtime_error("image descriptor is incompatible with the static runtime image interface");
 }
@@ -663,6 +696,7 @@ void ResourceMaterializer::ApplyStaticInterface(IrProgram& program) const {
     const auto slots = BindlessSlots();
     for (std::uint32_t index = 0u; index < directCount; ++index) {
         auto image = images[index];
+        image.srgbDecodeFormats = resources.srgbDecodeFormats;
         if (image.indirectRoot != ImageResource::NoIndirectImage) throw std::runtime_error("static image interface was already expanded");
         image.numericClass = image.atomic ? IrTextureNumericClass::Uint : IrTextureNumericClass::Float;
         image.mipCount = image.mipMode == ImageMipMode::DynamicStorage ? RuntimeAbi::StorageHeapCapacity : 1u;

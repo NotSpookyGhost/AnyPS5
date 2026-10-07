@@ -74,7 +74,7 @@ static_assert(sizeof(FragmentParameter) == 12, "FragmentParameter changed: updat
 static_assert(sizeof(CompiledShaderInfo) == 328, "CompiledShaderInfo changed: update the info encoder");
 static_assert(sizeof(ShaderInfo) == 224, "ShaderInfo changed: update the info encoder");
 static_assert(sizeof(BufferResource) == 24, "BufferResource changed: update the info encoder");
-static_assert(sizeof(ImageResource) == 96, "ImageResource changed: update the info encoder");
+static_assert(sizeof(ImageResource) == 104, "ImageResource changed: update the info encoder");
 static_assert(sizeof(SamplerResource) == 12, "SamplerResource changed: update the info encoder");
 static_assert(sizeof(SampledResourcePair) == 12, "SampledResourcePair changed: update the info encoder");
 static_assert(sizeof(StageInput) == 56, "StageInput changed: update the info encoder");
@@ -464,6 +464,8 @@ void encodeInfo(Writer& writer, const CompiledShaderInfo& compiled) {
         out.Value(image.cube);
         out.Value(image.r128);
         out.Value(image.srgbDecode);
+        out.Value(image.srgbDecodeCompatible);
+        out.Value(image.srgbDecodeFormats);
         out.Value(image.depthBits);
         out.Value(image.depthUnorm16);
         out.Value(image.packed);
@@ -540,7 +542,7 @@ void decodeInfo(Reader& reader, CompiledShaderInfo& compiled) {
         in.Value(buffer.formattedReadMask);
         in.Value(buffer.scalar);
     });
-    reader.List(info.images, 65, [](Reader& in, ImageResource& image) {
+    reader.List(info.images, 72, [](Reader& in, ImageResource& image) {
         in.Value(image.source);
         in.Value(image.firstUsePc);
         in.Value(image.resourceClass);
@@ -558,6 +560,8 @@ void decodeInfo(Reader& reader, CompiledShaderInfo& compiled) {
         in.Value(image.cube);
         in.Value(image.r128);
         in.Value(image.srgbDecode);
+        in.Value(image.srgbDecodeCompatible);
+        in.Value(image.srgbDecodeFormats);
         in.Value(image.depthBits);
         in.Value(image.depthUnorm16);
         in.Value(image.packed);

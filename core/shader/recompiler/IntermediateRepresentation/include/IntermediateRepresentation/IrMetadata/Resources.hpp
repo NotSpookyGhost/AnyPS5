@@ -32,6 +32,8 @@ struct BufferResource {
 enum class ImageMipMode { None, DynamicStorage };
 
 namespace EmulatedCompare {
+inline constexpr std::uint32_t Unsupported = 1u << 31u;
+inline constexpr std::uint32_t RequiresSingleLevel = 1u << 30u;
 inline constexpr std::uint32_t Enabled = 1u << 0u;
 inline constexpr std::uint32_t FunctionShift = 1u;
 inline constexpr std::uint32_t Linear = 1u << 4u;
@@ -72,6 +74,8 @@ struct ImageResource {
     bool cube = false;
     bool r128 = false;
     bool srgbDecode = false;
+    bool srgbDecodeCompatible = true;
+    std::uint32_t srgbDecodeFormats = 0u;
     bool depthBits = false;
     bool depthUnorm16 = false;
     bool packed = false;

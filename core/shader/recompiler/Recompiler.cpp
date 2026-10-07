@@ -522,6 +522,11 @@ std::shared_ptr<PreparedBindingPlan> preparedBindingPlan(const CompiledVariant& 
         key.push_back(descriptor.dwords[1] & ~0xffu);
         for (std::size_t word = 2; word < 8; ++word) key.push_back(descriptor.dwords[word]);
     }
+    for (std::size_t index = 0; index < variant.info.info.samplers.size(); ++index) {
+        const auto& descriptor = snapshot.samplers.at(index);
+        key.push_back(descriptor.dwordCount);
+        for (std::size_t word = 0; word < 4; ++word) key.push_back(descriptor.dwords[word]);
+    }
     key.push_back(exports.size());
     for (const auto mapping : exports) key.push_back(mapping);
     static std::shared_mutex mutex;
