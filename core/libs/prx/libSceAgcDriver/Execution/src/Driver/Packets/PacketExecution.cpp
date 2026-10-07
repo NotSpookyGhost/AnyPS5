@@ -30,7 +30,10 @@ void Driver::timed(double WorkerProfile::*bucket, TWork&& work) {
 }
 
 void Driver::execute(const Submission& submission) {
+    auto* submissionTiming = includeTimingSubmission(submission, true);
     if (submission.suspend) {
+        PerformanceContext timingContext(submissionTiming);
+        PerformanceTimer timing("Driver.Suspend");
 
         static const bool suspendDrain = std::getenv("APS5_SUSPEND_DRAIN") != nullptr;
         static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
@@ -104,9 +107,13 @@ void Driver::execute(const Submission& submission) {
         const auto packet = std::span(submission.commands).subspan(cursor, count);
         const auto opcode = (header >> 8u) & 0xffu;
         auto nextCursor = cursor + count;
+        if (APS5_ENABLE_TIMING_LOG && submission.queue == 0 && pendingFrameTiming == nullptr) includeTimingSubmission(submission, false);
+        PerformanceContext timingContext(submission.queue == 0 ? pendingFrameTiming.get() : FrameTiming::Async());
+        PerformanceTimer timing("Driver.Packet");
         std::shared_lock deviceUse(deviceReplacement, std::defer_lock);
         if (opcode != 0x3c && opcode != 0x93 && header != RenderingWaitPacketHeader && header != FlipPacketHeader) deviceUse.lock();
 
+        timing.Mark("device_lock");
         GuestMemory::SetCurrentPacket(header == FlipPacketHeader ? 0xffffu : opcode, submission.queue);
         CaptureTrace::Log("packet submission=%llu queue=%x offset=%zu header=%08x words=%zu", static_cast<unsigned long long>(submission.serial), submission.queue, cursor, header, packet.size());
         if (Pm4::Predicated(header) && queue.predication.operation != 0) {
@@ -123,6 +130,7 @@ void Driver::execute(const Submission& submission) {
 
         const auto flushStart = profilePackets ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         flushBetweenPackets(submission.queue, header, opcode == 0x49 || opcode == 0x37);
+        timing.Mark("flush_between_packets");
         PacketTimer packetTimer{profilePackets, header == FlipPacketHeader ? 0xffffu : opcode, submission.queue, packetProfile, std::chrono::steady_clock::now()};
 
         if (profilePackets) {
@@ -161,6 +169,7 @@ void Driver::execute(const Submission& submission) {
         bool wroteOnGpu = false, endOfPipeInterrupt = false, interruptDeferred = false, drawPacket = false, sampleDump = false;
         const bool drains = preparePacketMemory(submission, queue, packet, header, opcode, wroteOnGpu, endOfPipeInterrupt, interruptDeferred, drawPacket, sampleDump);
         traceLabel(packet, submission.queue);
+        timing.Mark("prepare_memory");
 
         const bool waitPacket = opcode == 0x3c || opcode == 0x93 || header == RenderingWaitPacketHeader;
         struct Progress {
@@ -192,10 +201,14 @@ void Driver::execute(const Submission& submission) {
             if (batchesAtFlip != 0) flipSerial = batchesAtFlip;
             flipBatchesUnsignaled += unsignaledAtFlip;
 
-            auto frame = std::make_shared<FrameTiming>(++frameSerial);
+            timing.Mark("flip_flush");
+            timing.FinishPacket(submission.serial, cursor, 0xffffu, count);
+            auto frame = APS5_ENABLE_TIMING_LOG ? std::move(pendingFrameTiming) : std::make_shared<FrameTiming>(++frameSerial);
+            require(frame != nullptr, "flip has no frame timing");
             const auto now = FrameTiming::Clock::now();
-            frame->IncludeSubmission(submission.serial, now, now, now, true);
-            frame->SetFlip(submission.serial, cursor, now, now);
+            if (!APS5_ENABLE_TIMING_LOG) frame->IncludeSubmission(submission.serial, now, now, now, true);
+            frame->SetFlip(submission.serial, cursor, APS5_ENABLE_TIMING_LOG ? submission.receivedAt : now, now);
+            if (APS5_ENABLE_TIMING_LOG) frame->CollectBackground();
             frame->NoteFlipBatches(batchesAtFlip, unsignaledAtFlip);
             CaptureTrace::Log("flip frame=%llu submission=%llu offset=%zu batch=%llu unsignaled=%llu", static_cast<unsigned long long>(frameSerial), static_cast<unsigned long long>(submission.serial), cursor, static_cast<unsigned long long>(batchesAtFlip), static_cast<unsigned long long>(unsignaledAtFlip));
             submission.flips.at(cursor)->GpuReady(frame);
@@ -271,9 +284,14 @@ void Driver::execute(const Submission& submission) {
             if (endOfPipeInterrupt && !interruptDeferred) AgcDriverDeliverEopInterrupt(submission.queue);
         }
         if (drawPacket || (sampleDump && wroteOnGpu)) Graphics::Recorder::CountRecordedWork();
+        timing.Mark(header == RenderingWaitPacketHeader ? "rendering_wait" : opcode == 0x3c || opcode == 0x93 ? "memory_wait" : opcode == 0x15 || opcode == 0x16 ? "dispatch" : drawPacket ? "draw" : "execute");
+        if (submission.queue == 0) timing.FinishPacket(submission.serial, cursor, opcode, count);
+        else timing.Finish();
         cursor = nextCursor;
     }
 
+    PerformanceContext endContext(submission.queue == 0 ? frameTiming() : FrameTiming::Async());
+    PerformanceTimer endTiming("Driver.EndSubmission");
     static const bool submitAtEnd = std::getenv("APS5_SUBMIT_AT_END") != nullptr;
     if (!deferredLabels().labels.empty() || Graphics::Recorder::PendingLabelSince().has_value() || Graphics::Recorder::RecordedWorkSinceSubmit() != 0) {
         auto& costs = submissionCosts(submission.queue);
@@ -289,6 +307,7 @@ void Driver::execute(const Submission& submission) {
         recordDeferredLabels(localDevice.get(), submission.queue);
         if (localDevice != nullptr) localDevice->SubmitRecorded(submission.queue == 0);
     }
+    endTiming.Finish();
     if (submission.rewindTail != nullptr) executeRewindTail(submission);
 }
 

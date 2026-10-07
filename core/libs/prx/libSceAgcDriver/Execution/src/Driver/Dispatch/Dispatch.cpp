@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
@@ -11,6 +12,7 @@
 namespace AgcDriver::DriverDetail {
 
 void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission, std::uint64_t indirectArguments) {
+    PerformanceTimer timing("Driver.Dispatch");
     const auto address = (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20c)) << 8u) | (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20d) & 0xffu) << 40u);
     auto it = submission.shaders->upper_bound(address);
     std::shared_ptr<const ShaderSnapshot> registeredShader;
@@ -179,9 +181,11 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
 
     mix(reinterpret_cast<std::uintptr_t>(registeredShader.get()));
     phaseTiming.Phase(PhaseKey);
+    timing.Mark("decode_key_device_setup");
     lookupDispatch(address, submission, key, noDispatchCache, traceCache, profile, memory, phaseTiming, phaseMs, compiledResult, keepVariant, captured, liveWords, dataHit, cached, validated, missedEntry, missedDiffering);
+    timing.Mark("lookup_cache");
     if (cached) {
-        require(keepVariant != nullptr && keepVariant->shader == it->second, "dispatch cache belongs to another registered shader");
+        require(keepVariant != nullptr && keepVariant->shader == registeredShader, "dispatch cache belongs to another registered shader");
         captureMs += phaseTiming.Elapsed();
     } else {
         shaderMemory = std::make_shared<ShaderMemory>(memory, &queryPendingWrite, &observePendingWrite, hookWaitCounter());
@@ -190,6 +194,7 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         static const bool dumpShaders = std::getenv("APS5_DUMP_SHADERS") != nullptr;
         try {
             const auto invocation = InvocationFor(snapshot, codeOffset, request);
+            timing.Mark("prepared_invocation");
 
             const auto waitedBefore = traceCapSync() ? Graphics::Recorder::ThreadWaitedMs() : 0.0;
             forgetAtCapture = GuestMemory::ForgetSerial();
@@ -206,7 +211,9 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             const auto started = std::chrono::steady_clock::now();
 
 
+            timing.Mark("capture_resources");
             compiledResult = invocation.Materialize(*capture);
+            timing.Mark("materialize");
             if (compiledResult->cacheHit) ++cacheHits;
             const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
             static double totalMs = 0;

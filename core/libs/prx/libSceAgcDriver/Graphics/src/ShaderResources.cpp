@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
 #include "ThreadOwned.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
@@ -938,6 +939,7 @@ void ValidateRuntimeResources(const CompiledShader& shader, std::span<const std:
 }
 
 void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes) {
+    PerformanceTimer frameTiming("Resources.Prepare");
     const auto stageStart = std::chrono::steady_clock::now();
     phaseStart = stageStart;
     if (BuildProfiled()) {
@@ -1086,6 +1088,7 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
 }
 
 void ShaderResources::buildComplete() {
+    PerformanceTimer frameTiming("Resources.Complete");
     Require(!completed, "cannot update a published descriptor heap");
     const auto stageStart = std::chrono::steady_clock::now();
     phaseStart = stageStart;

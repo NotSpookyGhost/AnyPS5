@@ -21,6 +21,8 @@ public:
 private:
     struct State;
     std::unique_ptr<State> state;
+    State* root = nullptr;
+    bool committed = false;
 };
 
 }

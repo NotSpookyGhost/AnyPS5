@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_DRIVER_SHADERREGISTRY_HPP
 
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -25,7 +26,7 @@ struct PreparedShaderState {
     struct Rectangle {
         std::uint64_t vertexId;
         std::uint64_t fragmentId;
-        ShaderRecompiler::RectListShaders shaders;
+        std::shared_ptr<const ShaderRecompiler::RectListShaders> shaders;
     };
     struct RectangleProgress {
         std::weak_ptr<const ShaderSnapshot> fragment;
@@ -49,6 +50,12 @@ struct PreparedShaders : PreparedShaderState {
     std::mutex mutex;
 };
 
+struct RegisteredShaderState {
+    Registers shader;
+    Registers context;
+    Registers userConfig;
+};
+
 struct ShaderSnapshot {
     std::uint64_t codeAddress;
     std::uint64_t headerAddress;
@@ -56,6 +63,7 @@ struct ShaderSnapshot {
     std::vector<std::uint32_t> code;
     std::vector<std::byte> header;
     std::shared_ptr<PreparedShaders> prepared = std::make_shared<PreparedShaders>();
+    std::shared_ptr<const RegisteredShaderState> registeredState;
 };
 
 

@@ -51,6 +51,22 @@ void Transactions() {
     Require(!front.prepared->rectangleRequested && !pixel->prepared->rectangleRequested, "nested abort did not roll back the group");
     Reject([&] { ResolvePreparedGraphics(front, pixel, 7, {}); });
     Require(!front.prepared->rectangleRequested && front.prepared->fragments.empty(), "failed rectangle preparation published a link");
+    const auto rectangle = std::make_shared<const RectListShaders>();
+    front.prepared->rectangles.push_back({1, 2, rectangle});
+    {
+        ShaderPreparationTransaction transaction;
+        auto& prepared = transaction.Edit(front);
+        Require(prepared.rectangles.front().shaders == rectangle, "transaction copied an immutable rectangle artifact");
+        {
+            ShaderPreparationTransaction nested;
+            Require(&nested.Edit(front) == &prepared, "nested transaction did not reuse root changes");
+            nested.Edit(*pixel).rectangleRequested = true;
+            nested.Commit();
+        }
+        Require(!pixel->prepared->rectangleRequested, "nested commit published before root commit");
+        transaction.Commit();
+    }
+    Require(pixel->prepared->rectangleRequested && front.prepared->rectangles.front().shaders == rectangle, "root commit lost nested changes or shared artifacts");
     std::weak_ptr<PreparedShaders> staged;
     {
         auto temporary = std::make_shared<ShaderSnapshot>();

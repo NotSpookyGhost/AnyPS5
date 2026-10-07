@@ -218,6 +218,8 @@ private:
     void dumpSampleCounters(std::uint64_t address);
     template <typename TWork>
     static void timed(double WorkerProfile::*bucket, TWork&& work);
+    FrameTiming* frameTiming();
+    FrameTiming* includeTimingSubmission(const Submission& submission, bool firstSegment);
     void execute(const Submission& submission);
     void markCompleted(std::uint64_t serial);
     static const std::atomic<std::uint64_t>*& workerQueued();
@@ -230,6 +232,7 @@ private:
 
     std::map<std::uint32_t, QueueWorker> workers;
     std::uint64_t frameSerial = 0;
+    std::shared_ptr<FrameTiming> pendingFrameTiming;
 
     std::atomic<std::uint64_t> flipsCounted{0};
     std::atomic<std::uint64_t> flipSerial{0};
