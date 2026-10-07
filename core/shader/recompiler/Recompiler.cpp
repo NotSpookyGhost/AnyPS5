@@ -498,6 +498,7 @@ struct PreparedModuleEntry {
 
 struct PreparedBindingPlan {
     std::once_flag ready;
+    std::exception_ptr failure;
     DescriptorBindingPlan bindings;
     std::shared_mutex mutex;
     std::map<std::vector<std::uint32_t>, std::shared_ptr<PreparedModuleEntry>> modules;
@@ -541,7 +542,14 @@ std::shared_ptr<PreparedBindingPlan> preparedBindingPlan(const CompiledVariant& 
         const auto found = plans.find(key);
         plan = found != plans.end() ? found->second : plans.emplace(key, std::make_shared<PreparedBindingPlan>()).first->second;
     }
-    std::call_once(plan->ready, [&] { plan->bindings = DescriptorBindingBuilder{}.Prepare(variant.bindings.layout, variant.info.info, variant.info.stage, snapshot, exports); });
+    std::call_once(plan->ready, [&] {
+        try {
+            plan->bindings = DescriptorBindingBuilder{}.Prepare(variant.bindings.layout, variant.info.info, variant.info.stage, snapshot, exports);
+        } catch (...) {
+            plan->failure = std::current_exception();
+        }
+    });
+    if (plan->failure) std::rethrow_exception(plan->failure);
     return plan;
 }
 
