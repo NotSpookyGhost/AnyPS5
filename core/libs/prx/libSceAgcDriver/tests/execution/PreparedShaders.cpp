@@ -30,12 +30,42 @@ void ExpectFailure(TAction action, const char* expected) {
     throw std::runtime_error("expected preparation failure");
 }
 
+void RunUnregistered(AgcDriver::VulkanDevice& device, ShaderRecompiler::RecompileRequest request) {
+    const auto code = request.shader.code;
+    for (const bool sourceFirst : {false, true}) {
+        AgcDriver::DriverDetail::ShaderSnapshot snapshot{request.shader.codeAddress, 0, 0, {code.begin(), code.end()}, {}};
+        request.shader.code = snapshot.code;
+        if (sourceFirst) {
+            const auto handle = AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, request);
+            Require(snapshot.prepared->entries.size() == 1 && snapshot.prepared->entries.front().handle == handle, "unregistered compute source was not cached");
+        }
+        static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 0, request));
+        Require(snapshot.prepared->entries.size() == 1, "unregistered compute invocation did not cache exactly one artifact");
+        const auto handle = snapshot.prepared->entries.front().handle;
+        const auto& artifact = ShaderRecompiler::GetPreparedArtifact(*handle);
+        for (const bool useCache : {false, true}) {
+            request.useCache = useCache;
+            Require(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, request) == handle, "unregistered compute source was prepared again");
+            const auto repeated = AgcDriver::DriverDetail::InvocationFor(snapshot, 0, request);
+            ShaderRecompiler::SrtRuntime runtime{};
+            runtime.userData = request.context.userData;
+            const auto capture = repeated.Capture(runtime);
+            const auto result = repeated.Materialize(*capture);
+            Require(snapshot.prepared->entries.size() == 1 && result->variantId == artifact.variantId && result->spirv.data() == artifact.spirv.data(), "unregistered compute invocation replaced its cached artifact");
+            device.Dispatch(*result, 1, 1, 1);
+        }
+        device.WaitIdle();
+    }
+}
+
 void Run(AgcDriver::VulkanDevice& device) {
     alignas(256) std::array<std::uint32_t, 1> code{0xbf810000u};
     std::array<std::uint32_t, 4> users{};
     const ShaderRecompiler::ShaderComputeStageInfo compute{{1, 1, 1}, 0, {false, false, false}, false, 1, {}};
     ShaderRecompiler::RecompileRequest request{{ShaderRecompiler::ShaderStage::Compute, reinterpret_cast<std::uintptr_t>(code.data()), code, 0, {}}, {32, 0, users, compute, {}, {}, {}}, device.ComputeTarget(32), {0, 0, 0, 128}};
+    RunUnregistered(device, request);
     AgcDriver::DriverDetail::ShaderSnapshot snapshot{request.shader.codeAddress, 0, 0, {code.begin(), code.end()}, {}};
+    snapshot.header.resize(sizeof(Shader));
     ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, request)); }, "artifact is missing");
     const auto handle = ShaderRecompiler::PrepareShader(request);
     snapshot.prepared->entries.push_back({0, handle});
@@ -100,6 +130,8 @@ void Run(AgcDriver::VulkanDevice& device) {
     ExpectFailure([&] { static_cast<void>(ShaderRecompiler::MaterializeShader(request, *capture, *otherHandle)); }, "another prepared shader");
     request.context.compute->numThreads[0] = 1;
     request.layout.pushConstantSizeBytes = 124;
+    Require(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, request) == handle, "compatible push constant capacity discarded the prepared artifact");
+    request.layout.pushConstantSizeBytes = 126;
     ExpectFailure([&] { static_cast<void>(AgcDriver::DriverDetail::SourceHandleFor(snapshot, 0, request)); }, "artifact is missing");
     request.layout.pushConstantSizeBytes = 128;
     code[0] = 0xffffffffu;
