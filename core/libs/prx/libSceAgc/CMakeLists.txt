@@ -236,9 +236,13 @@ if(BUILD_TESTING)
     endif()
 endif()
 
-add_test_executable(agc_interpolant_mapping_tests EXCLUDE_FROM_ALL tests/InterpolantMapping.cpp)
+add_test_executable(agc_interpolant_mapping_tests EXCLUDE_FROM_ALL
+        tests/InterpolantMapping.cpp
+        Shader/src/InterpolantMapping.cpp
+        Shader/src/ShaderUtils.cpp
+)
 target_include_directories(agc_interpolant_mapping_tests PRIVATE ${LIBS_INCLUDE_DIR})
-target_link_libraries(agc_interpolant_mapping_tests PRIVATE libSceAgc libc)
+target_link_libraries(agc_interpolant_mapping_tests PRIVATE libSceAgcDriver libc)
 set_target_properties(agc_interpolant_mapping_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_interpolant_mapping_tests)
 
@@ -252,9 +256,15 @@ if(BUILD_TESTING)
 endif()
 
 if(BUILD_TESTING)
-    add_test_executable(guest_shader_link_tests ${LIBS_INCLUDE_DIR}/tests/GuestShaderLink.cpp)
+    add_test_executable(guest_shader_link_tests
+            ${LIBS_INCLUDE_DIR}/tests/GuestShaderLink.cpp
+            Shader/src/LinkShaders.cpp
+            Shader/src/PrimState.cpp
+            Shader/src/InterpolantMapping.cpp
+            Shader/src/ShaderUtils.cpp
+    )
     target_include_directories(guest_shader_link_tests PRIVATE ${LIBS_INCLUDE_DIR})
-    target_link_libraries(guest_shader_link_tests PRIVATE libSceAgc libc)
+    target_link_libraries(guest_shader_link_tests PRIVATE libSceAgc libSceAgcDriver libc)
     configure_windows_unwind(guest_shader_link_tests)
     add_test(NAME guest_shader_link COMMAND guest_shader_link_tests)
     if(WIN32)
