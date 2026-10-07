@@ -791,6 +791,8 @@ void verifyBuiltinSpecialization() {
     emit(spv::OpConstant, {3u, 8u, 2u});
     emit(spv::OpConstant, {3u, 9u, 3u});
     emit(spv::OpConstantComposite, {4u, 30u, 6u, 7u, 8u, 9u});
+    emit(spv::OpTypePointer, {32u, spv::StorageClassPrivate, 4u});
+    emit(spv::OpVariable, {32u, 31u, spv::StorageClassPrivate});
     emit(spv::OpFunction, {1u, 10u, spv::FunctionControlMaskNone, 5u});
     emit(spv::OpLabel, {11u});
     emit(spv::OpBitFieldUExtract, {3u, 12u, 9u, 7u, 7u});
@@ -812,6 +814,7 @@ void verifyBuiltinSpecialization() {
     emit(spv::OpVectorExtractDynamic, {3u, 25u, 30u, 8u});
     emit(spv::OpVectorExtractDynamic, {3u, 26u, 30u, 9u});
     emit(spv::OpCompositeConstruct, {4u, 27u, 23u, 24u, 25u, 26u});
+    emit(spv::OpStore, {31u, 27u});
     emit(spv::OpBranch, {22u});
     emit(spv::OpLabel, {21u});
     emit(spv::OpUnreachable, {});
@@ -826,12 +829,72 @@ void verifyBuiltinSpecialization() {
         require(count != 0u && count <= specialized.size() - cursor, "builtin specialization produced a truncated instruction");
         const auto op = static_cast<spv::Op>(specialized[cursor] & 0xffffu);
         require(op != spv::OpSwitch && op != spv::OpBranchConditional && op != spv::OpPhi && op != spv::OpVectorExtractDynamic, "builtin specialization retained constant control flow or dynamic exports");
-        if (op == spv::OpCopyObject && specialized[cursor + 2u] == 27u) identity = specialized[cursor + 3u] == 30u;
+        if (op == spv::OpStore && specialized[cursor + 1u] == 31u) identity = specialized[cursor + 2u] == 30u;
         if (op == spv::OpConstant && specialized[cursor + 2u] == 18u) correctPhi = specialized[cursor + 3u] == 1u;
         cursor += count;
     }
     require(identity && correctPhi, "builtin specialization selected the wrong export or phi value");
     require(SpecializeSpirv(specialized) == specialized, "builtin specialization is not stable");
+}
+
+void verifySpecializationLiveness() {
+    std::vector<std::uint32_t> words{spv::MagicNumber, 0x00010300u, 0u, 64u, 0u};
+    const auto emit = [&](spv::Op op, std::initializer_list<std::uint32_t> operands) {
+        words.push_back((static_cast<std::uint32_t>(operands.size() + 1u) << 16u) | op);
+        words.insert(words.end(), operands);
+    };
+    emit(spv::OpCapability, {spv::CapabilityShader});
+    emit(spv::OpMemoryModel, {spv::AddressingModelLogical, spv::MemoryModelGLSL450});
+    emit(spv::OpEntryPoint, {spv::ExecutionModelGLCompute, 10u, 0x6e69616du, 0u});
+    emit(spv::OpExecutionMode, {10u, spv::ExecutionModeLocalSize, 1u, 1u, 1u});
+    emit(spv::OpDecorate, {27u, spv::DecorationRelaxedPrecision});
+    emit(spv::OpTypeVoid, {1u});
+    emit(spv::OpTypeInt, {3u, 32u, 0u});
+    emit(spv::OpTypePointer, {4u, spv::StorageClassPrivate, 3u});
+    emit(spv::OpTypeFunction, {5u, 1u});
+    emit(spv::OpConstant, {3u, 6u, 0u});
+    emit(spv::OpConstant, {3u, 7u, 1u});
+    emit(spv::OpTypeStruct, {24u, 3u, 3u, 3u, 3u, 3u, 3u, 3u, 3u, 3u, 3u, 3u, 3u, 3u, 3u, 3u, 3u});
+    emit(spv::OpConstantComposite, {24u, 25u, 7u, 7u, 7u, 7u, 7u, 7u, 7u, 7u, 7u, 7u, 7u, 7u, 7u, 7u, 7u, 7u});
+    emit(spv::OpVariable, {4u, 8u, spv::StorageClassPrivate, 6u});
+    emit(spv::OpFunction, {1u, 10u, spv::FunctionControlMaskNone, 5u});
+    emit(spv::OpLabel, {11u});
+    emit(spv::OpLoad, {3u, 12u, 8u});
+    emit(spv::OpIMul, {3u, 13u, 12u, 7u});
+    emit(spv::OpIAdd, {3u, 14u, 13u, 7u});
+    emit(spv::OpCopyObject, {3u, 15u, 12u});
+    emit(spv::OpCopyObject, {3u, 16u, 15u});
+    emit(spv::OpIAdd, {3u, 17u, 16u, 7u});
+    emit(spv::OpStore, {8u, 17u});
+    emit(spv::OpLoad, {3u, 18u, 8u, spv::MemoryAccessVolatileMask});
+    emit(spv::OpFunctionCall, {1u, 20u, 30u});
+    emit(spv::OpCompositeExtract, {3u, 26u, 25u, 15u});
+    emit(spv::OpStore, {8u, 26u});
+    emit(spv::OpCopyObject, {3u, 27u, 12u});
+    emit(spv::OpStore, {8u, 27u});
+    emit(spv::OpLoad, {3u, 28u, 8u});
+    emit(spv::OpReturn, {});
+    emit(spv::OpFunctionEnd, {});
+    emit(spv::OpFunction, {1u, 30u, spv::FunctionControlMaskNone, 5u});
+    emit(spv::OpLabel, {31u});
+    emit(spv::OpReturn, {});
+    emit(spv::OpFunctionEnd, {});
+    const auto specialized = SpecializeSpirv(words);
+    std::map<std::uint32_t, std::vector<std::uint32_t>> results;
+    std::size_t stores = 0;
+    for (std::size_t cursor = 5; cursor < specialized.size();) {
+        const auto count = specialized[cursor] >> 16u;
+        const auto op = static_cast<spv::Op>(specialized[cursor] & 0xffffu);
+        require(count != 0u && count <= specialized.size() - cursor, "dead computation removal truncated an instruction");
+        if (op == spv::OpLoad || op == spv::OpCopyObject || op == spv::OpIAdd || op == spv::OpIMul || op == spv::OpCompositeExtract || op == spv::OpFunctionCall) results.emplace(specialized[cursor + 2u], std::vector<std::uint32_t>(specialized.begin() + cursor, specialized.begin() + cursor + count));
+        if (op == spv::OpStore) ++stores;
+        cursor += count;
+    }
+    for (const auto id : {13u, 14u, 15u, 16u, 28u}) require(!results.contains(id), "specialization retained a dead computation or copy chain");
+    require(results.at(17u).at(3) == 12u, "copy propagation lost the live source");
+    require(results.at(26u).at(4) == 15u, "copy propagation rewrote a literal as an ID");
+    require(results.contains(18u) && results.contains(20u) && results.contains(27u) && stores == 3u, "specialization removed an effect or decorated copy");
+    require(SpecializeSpirv(specialized) == specialized, "dead computation removal is not stable");
 }
 
 void verifyDefaultDirectory(const char* self) {
@@ -868,6 +931,7 @@ int main(int argc, char** argv) {
         verifyBindingPlanSelection();
         verifyVertexTypeSpecialization();
         verifyBuiltinSpecialization();
+        verifySpecializationLiveness();
         std::error_code error;
         std::filesystem::remove_all(directory, error);
         std::cout << "shader disk cache tests passed\n";

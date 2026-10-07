@@ -886,7 +886,27 @@ double ShaderResources::phase(BuildPhase which) {
 
 namespace {
 
-void ValidateRuntimeResources(const CompiledShader& shader) {
+void ValidateDescriptorLayout(const Context& context, std::span<const VkDescriptorSetLayoutBinding> bindings) {
+    std::map<VkDescriptorType, std::uint64_t> heapTotals;
+    std::map<std::pair<VkShaderStageFlags, VkDescriptorType>, std::uint64_t> stageTotals;
+    std::map<VkShaderStageFlags, std::uint64_t> stageResources;
+    for (const auto& layout : bindings) {
+        heapTotals[layout.descriptorType] += layout.descriptorCount;
+        for (std::uint32_t bit = 0u; bit < 32u; ++bit) {
+            const auto stage = VkShaderStageFlags{1u} << bit;
+            if ((layout.stageFlags & stage) == 0u) continue;
+            const auto count = stageTotals[{stage, layout.descriptorType}] += layout.descriptorCount;
+            const auto all = stageResources[stage] += layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER ? 0u : layout.descriptorCount;
+            Require(all <= context.limits.maxPerStageResources, "typed heaps exceed per-stage resource capacity");
+            if (layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) Require(count <= context.limits.maxPerStageDescriptorSampledImages, "typed heaps exceed per-stage sampled image capacity");
+            if (layout.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) Require(count <= context.limits.maxPerStageDescriptorStorageImages, "typed heaps exceed per-stage storage image capacity");
+            if (layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER) Require(count <= context.limits.maxPerStageDescriptorSamplers, "typed heaps exceed per-stage sampler capacity");
+        }
+    }
+    Require(heapTotals[VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE] <= context.limits.maxDescriptorSetSampledImages && heapTotals[VK_DESCRIPTOR_TYPE_STORAGE_IMAGE] <= context.limits.maxDescriptorSetStorageImages && heapTotals[VK_DESCRIPTOR_TYPE_SAMPLER] <= context.limits.maxDescriptorSetSamplers, "typed heaps exceed descriptor set capacity");
+}
+
+void ValidateRuntimeResources(const CompiledShader& shader, std::span<const std::uint32_t> words) {
     Require(shader.program != nullptr, "missing compiled shader");
     const auto& program = *shader.program;
     const auto& descriptors = program.bindings;
@@ -900,22 +920,18 @@ void ValidateRuntimeResources(const CompiledShader& shader) {
             heap = &binding;
         }
     }
-    for (const auto& binding : descriptors) {
-        if (binding.role != ShaderRecompiler::DescriptorRole::ShaderData) continue;
-        Require(binding.guestDescriptor.size() == program.shaderDataDwords, "invalid compact shader data size");
-        const auto words = std::span<const std::uint32_t>(binding.guestDescriptor);
-        constexpr auto metadataWords = sizeof(ShaderRecompiler::RuntimeAbi::ResourceMetadata) / sizeof(std::uint32_t);
-        Require(program.imageMetadataDword <= words.size() && program.runtimeImageCount <= (words.size() - program.imageMetadataDword) / metadataWords, "runtime image metadata exceeds shader data");
-        for (const auto index : program.runtimeImageResources) {
-            Require(index < program.runtimeImageCount, "runtime image resource exceeds its compact layout");
-            const auto offset = program.imageMetadataDword + index * metadataWords;
-            const auto kind = words[offset];
-            const auto first = words[offset + 1u];
-            const auto count = words[offset + 2u];
-            Require(count != 0u, "runtime image metadata has no descriptor elements");
-            Require(kind < heaps.size() && heaps[kind] != nullptr, "runtime metadata references an unbound image heap");
-            Require(first < heaps[kind]->count && count <= heaps[kind]->count - first, "runtime metadata exceeds its bound heap");
-        }
+    Require(words.size() == program.shaderDataDwords, "invalid compact shader data size");
+    constexpr auto metadataWords = sizeof(ShaderRecompiler::RuntimeAbi::ResourceMetadata) / sizeof(std::uint32_t);
+    Require(program.imageMetadataDword <= words.size() && program.runtimeImageCount <= (words.size() - program.imageMetadataDword) / metadataWords, "runtime image metadata exceeds shader data");
+    for (const auto index : program.runtimeImageResources) {
+        Require(index < program.runtimeImageCount, "runtime image resource exceeds its compact layout");
+        const auto offset = program.imageMetadataDword + index * metadataWords;
+        const auto kind = words[offset];
+        const auto first = words[offset + 1u];
+        const auto count = words[offset + 2u];
+        Require(count != 0u, "runtime image metadata has no descriptor elements");
+        Require(kind < heaps.size() && heaps[kind] != nullptr, "runtime metadata references an unbound image heap");
+        Require(first < heaps[kind]->count && count <= heaps[kind]->count - first, "runtime metadata exceeds its bound heap");
     }
 }
 
@@ -995,14 +1011,13 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
                     Require(binding.count == 1, "shader data and flattened SRT descriptors must not be arrays");
                     Require(!binding.guestDescriptor.empty(), "empty shader data descriptor");
                     if (binding.role == ShaderRecompiler::DescriptorRole::ShaderData) {
-                        Require(binding.guestDescriptor.size() == shader.program->shaderDataDwords, "shader data does not match the compact runtime layout");
+                        ValidateRuntimeResources(shader, binding.guestDescriptor);
                     }
                     item.allocations.push_back(addDataBuffer(binding.guestDescriptor));
                     if (binding.role == ShaderRecompiler::DescriptorRole::ShaderData) shaderData = static_cast<std::int64_t>(item.allocations.back());
                 }
                 bindings.push_back(std::move(item));
             }
-            ValidateRuntimeResources(shader);
             for (const auto index : offsetsInData) allocations[index].dataAllocation = shaderData;
             for (auto index = firstDeferred; index < deferredImages.size(); ++index) {
                 deferredImages[index].firstSampler = firstSampler;
@@ -1010,24 +1025,6 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
             }
         }
         Require(storageBuffers <= context.limits.maxDescriptorSetStorageBuffers, "pipeline descriptors exceed device limits");
-        std::map<VkDescriptorType, std::uint64_t> heapTotals;
-        std::map<std::pair<VkShaderStageFlags, VkDescriptorType>, std::uint64_t> stageTotals;
-        std::map<VkShaderStageFlags, std::uint64_t> stageResources;
-        for (const auto& binding : bindings) {
-            const auto& layout = binding.layout;
-            heapTotals[layout.descriptorType] += layout.descriptorCount;
-            for (std::uint32_t bit = 0u; bit < 32u; ++bit) {
-                const auto stage = VkShaderStageFlags{1u} << bit;
-                if ((layout.stageFlags & stage) == 0u) continue;
-                const auto count = stageTotals[{stage, layout.descriptorType}] += layout.descriptorCount;
-                const auto all = stageResources[stage] += layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER ? 0u : layout.descriptorCount;
-                Require(all <= context.limits.maxPerStageResources, "typed heaps exceed per-stage resource capacity");
-                if (layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) Require(count <= context.limits.maxPerStageDescriptorSampledImages, "typed heaps exceed per-stage sampled image capacity");
-                if (layout.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) Require(count <= context.limits.maxPerStageDescriptorStorageImages, "typed heaps exceed per-stage storage image capacity");
-                if (layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER) Require(count <= context.limits.maxPerStageDescriptorSamplers, "typed heaps exceed per-stage sampler capacity");
-            }
-        }
-        Require(heapTotals[VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE] <= context.limits.maxDescriptorSetSampledImages && heapTotals[VK_DESCRIPTOR_TYPE_STORAGE_IMAGE] <= context.limits.maxDescriptorSetStorageImages && heapTotals[VK_DESCRIPTOR_TYPE_SAMPLER] <= context.limits.maxDescriptorSetSamplers, "typed heaps exceed descriptor set capacity");
         timing.bindingsMs = phase(BuildPhase::Bindings);
         // For every build, locked ones included: their stage B then takes the fast path too, and the
         // collects cost the same wherever they run.
@@ -1044,6 +1041,7 @@ void ShaderResources::buildPrepare(std::span<const CompiledShader> shaders, cons
         if (context.descriptorCache != nullptr && !noLayoutCache) {
             _layout = context.descriptorCache->Layout(layoutKey, description);
         } else {
+            ValidateDescriptorLayout(context, description);
             VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
             info.bindingCount = static_cast<std::uint32_t>(description.size());
             info.pBindings = description.data();
@@ -2206,6 +2204,7 @@ VkDescriptorSetLayout DescriptorCache::Layout(std::span<const std::uint32_t> key
         ++stats.layoutHits;
         return found->second;
     }
+    ValidateDescriptorLayout(context, bindings);
     ++stats.layoutMisses;
     VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     info.bindingCount = static_cast<std::uint32_t>(bindings.size());
@@ -2411,6 +2410,11 @@ bool ShaderResources::DataWordsDiffer(const CompiledShader& shader) const {
 bool ShaderResources::RefreshData(VkCommandBuffer commands, const CompiledShader& shader, Recorder* recorder) {
     Require(shader.program != nullptr, "missing compiled shader");
     Require(!refreshResourceKey.empty() && MatchesContentKey(shader, refreshResourceKey), "runtime data refresh cannot replace bound resources");
+    return refreshData(commands, shader, recorder);
+}
+
+bool ShaderResources::refreshData(VkCommandBuffer commands, const CompiledShader& shader, Recorder* recorder) {
+    Require(shader.program != nullptr, "missing compiled shader");
     const auto& program = *shader.program;
     Require(program.bindings.size() == bindings.size(), "template bindings disagree with the shader");
     bool recorded = false;
@@ -2426,7 +2430,7 @@ bool ShaderResources::RefreshData(VkCommandBuffer commands, const CompiledShader
         const auto size = binding.guestDescriptor.size() * sizeof(std::uint32_t);
         Require(allocation.buffer != nullptr && !allocation.guest && allocation.size == size && size <= MaxRefreshBytes, "template data buffer cannot take the dispatch's words");
         if (allocation.dataWords.size() == binding.guestDescriptor.size() && std::equal(allocation.dataWords.begin(), allocation.dataWords.end(), binding.guestDescriptor.begin())) continue;
-        if (binding.role == ShaderRecompiler::DescriptorRole::ShaderData) ValidateRuntimeResources(shader);
+        if (binding.role == ShaderRecompiler::DescriptorRole::ShaderData) ValidateRuntimeResources(shader, binding.guestDescriptor);
         if (recorder != nullptr && timing == Recorder::NoTiming) timing = recorder->BeginGpuTiming(Recorder::CommandClass::TemplateDataRefresh);
         writeDataWords(commands, bindings[index].allocations.front(), binding.guestDescriptor);
         allocation.dataWords.assign(binding.guestDescriptor.begin(), binding.guestDescriptor.end());

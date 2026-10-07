@@ -33,6 +33,193 @@ Instruction Make(spv::Op op, std::initializer_list<std::uint32_t> operands) {
     return result;
 }
 
+bool PureInstruction(const Instruction& instruction) {
+    switch (Opcode(instruction)) {
+    case spv::OpVectorExtractDynamic:
+    case spv::OpVectorInsertDynamic:
+    case spv::OpVectorShuffle:
+    case spv::OpCompositeConstruct:
+    case spv::OpCompositeExtract:
+    case spv::OpCompositeInsert:
+    case spv::OpCopyObject:
+    case spv::OpTranspose:
+    case spv::OpConvertFToU:
+    case spv::OpConvertFToS:
+    case spv::OpConvertSToF:
+    case spv::OpConvertUToF:
+    case spv::OpUConvert:
+    case spv::OpSConvert:
+    case spv::OpFConvert:
+    case spv::OpQuantizeToF16:
+    case spv::OpConvertPtrToU:
+    case spv::OpSatConvertSToU:
+    case spv::OpSatConvertUToS:
+    case spv::OpConvertUToPtr:
+    case spv::OpPtrCastToGeneric:
+    case spv::OpGenericCastToPtr:
+    case spv::OpGenericCastToPtrExplicit:
+    case spv::OpBitcast:
+    case spv::OpSNegate:
+    case spv::OpFNegate:
+    case spv::OpIAdd:
+    case spv::OpFAdd:
+    case spv::OpISub:
+    case spv::OpFSub:
+    case spv::OpIMul:
+    case spv::OpFMul:
+    case spv::OpUDiv:
+    case spv::OpSDiv:
+    case spv::OpFDiv:
+    case spv::OpUMod:
+    case spv::OpSRem:
+    case spv::OpSMod:
+    case spv::OpFRem:
+    case spv::OpFMod:
+    case spv::OpVectorTimesScalar:
+    case spv::OpMatrixTimesScalar:
+    case spv::OpVectorTimesMatrix:
+    case spv::OpMatrixTimesVector:
+    case spv::OpMatrixTimesMatrix:
+    case spv::OpOuterProduct:
+    case spv::OpDot:
+    case spv::OpIAddCarry:
+    case spv::OpISubBorrow:
+    case spv::OpUMulExtended:
+    case spv::OpSMulExtended:
+    case spv::OpAny:
+    case spv::OpAll:
+    case spv::OpIsNan:
+    case spv::OpIsInf:
+    case spv::OpIsFinite:
+    case spv::OpIsNormal:
+    case spv::OpSignBitSet:
+    case spv::OpLessOrGreater:
+    case spv::OpOrdered:
+    case spv::OpUnordered:
+    case spv::OpLogicalEqual:
+    case spv::OpLogicalNotEqual:
+    case spv::OpLogicalOr:
+    case spv::OpLogicalAnd:
+    case spv::OpLogicalNot:
+    case spv::OpSelect:
+    case spv::OpIEqual:
+    case spv::OpINotEqual:
+    case spv::OpUGreaterThan:
+    case spv::OpSGreaterThan:
+    case spv::OpUGreaterThanEqual:
+    case spv::OpSGreaterThanEqual:
+    case spv::OpULessThan:
+    case spv::OpSLessThan:
+    case spv::OpULessThanEqual:
+    case spv::OpSLessThanEqual:
+    case spv::OpFOrdEqual:
+    case spv::OpFUnordEqual:
+    case spv::OpFOrdNotEqual:
+    case spv::OpFUnordNotEqual:
+    case spv::OpFOrdLessThan:
+    case spv::OpFUnordLessThan:
+    case spv::OpFOrdGreaterThan:
+    case spv::OpFUnordGreaterThan:
+    case spv::OpFOrdLessThanEqual:
+    case spv::OpFUnordLessThanEqual:
+    case spv::OpFOrdGreaterThanEqual:
+    case spv::OpFUnordGreaterThanEqual:
+    case spv::OpShiftRightLogical:
+    case spv::OpShiftRightArithmetic:
+    case spv::OpShiftLeftLogical:
+    case spv::OpBitwiseOr:
+    case spv::OpBitwiseXor:
+    case spv::OpBitwiseAnd:
+    case spv::OpNot:
+    case spv::OpBitFieldInsert:
+    case spv::OpBitFieldSExtract:
+    case spv::OpBitFieldUExtract:
+    case spv::OpBitReverse:
+    case spv::OpBitCount:
+    case spv::OpDPdx:
+    case spv::OpDPdy:
+    case spv::OpFwidth:
+    case spv::OpDPdxFine:
+    case spv::OpDPdyFine:
+    case spv::OpFwidthFine:
+    case spv::OpDPdxCoarse:
+    case spv::OpDPdyCoarse:
+    case spv::OpFwidthCoarse:
+    case spv::OpAccessChain:
+    case spv::OpInBoundsAccessChain:
+    case spv::OpPtrAccessChain:
+    case spv::OpInBoundsPtrAccessChain:
+    case spv::OpArrayLength:
+    case spv::OpPhi:
+        return true;
+    case spv::OpLoad:
+        return instruction.size() == 4u || (instruction.size() == 5u && instruction[4] == spv::MemoryAccessMaskNone);
+    default:
+        return false;
+    }
+}
+
+template<typename TVisitor>
+bool VisitInputs(const Instruction& instruction, const TVisitor& visit) {
+    std::size_t first = 3u;
+    std::size_t end = instruction.size();
+    switch (Opcode(instruction)) {
+    case spv::OpVectorShuffle:
+    case spv::OpCompositeInsert:
+        end = 5u;
+        break;
+    case spv::OpCompositeExtract:
+    case spv::OpGenericCastToPtrExplicit:
+    case spv::OpArrayLength:
+        end = 4u;
+        break;
+    case spv::OpLoad:
+        if (instruction.size() > 5u) return false;
+        end = 4u;
+        break;
+    case spv::OpStore:
+        if (instruction.size() > 4u) return false;
+        first = 1u;
+        end = 3u;
+        break;
+    case spv::OpBranch:
+    case spv::OpReturnValue:
+        first = 1u;
+        end = 2u;
+        break;
+    case spv::OpBranchConditional:
+        first = 1u;
+        end = 4u;
+        break;
+    case spv::OpSelectionMerge:
+        first = 1u;
+        end = 2u;
+        break;
+    case spv::OpLoopMerge:
+        first = 1u;
+        end = 3u;
+        break;
+    case spv::OpFunctionCall:
+        break;
+    case spv::OpReturn:
+    case spv::OpUnreachable:
+    case spv::OpKill:
+    case spv::OpLabel:
+    case spv::OpFunction:
+    case spv::OpFunctionEnd:
+    case spv::OpFunctionParameter:
+    case spv::OpLine:
+    case spv::OpNoLine:
+        return true;
+    default:
+        if (!PureInstruction(instruction)) return false;
+        break;
+    }
+    if (end > instruction.size()) throw std::runtime_error("truncated prepared instruction operands");
+    for (auto index = first; index < end; ++index) visit(index);
+    return true;
+}
+
 struct ScalarType {
     std::uint32_t width;
     bool boolean;
@@ -66,8 +253,9 @@ public:
         while (changed) {
             changed = fold();
             changed |= prune();
+            changed |= propagateCopies();
         }
-        removeUnusedExtracts();
+        removeDeadComputations();
         orderPhis();
         std::vector<std::uint32_t> words = header;
         bool inserted = false;
@@ -305,22 +493,91 @@ private:
         instructions = std::move(ordered);
     }
 
-    void removeUnusedExtracts() {
-        std::set<std::uint32_t> referenced;
+    bool propagateCopies() {
+        std::map<std::uint32_t, std::uint32_t> copies;
+        for (const auto& instruction : instructions) {
+            if (Opcode(instruction) != spv::OpCopyObject) continue;
+            if (instruction.size() != 4u) throw std::runtime_error("invalid prepared copy instruction");
+            copies.emplace(instruction[2], instruction[3]);
+        }
+        if (copies.empty()) return false;
         for (const auto& instruction : instructions) {
             if (instruction.empty()) continue;
             const auto op = Opcode(instruction);
-            if (op == spv::OpName || op == spv::OpDecorate) continue;
+            if (op == spv::OpName || op == spv::OpMemberName) continue;
+            if (VisitInputs(instruction, [](std::size_t) {})) continue;
             bool hasResult = false;
             bool hasType = false;
             spv::HasResultAndType(op, &hasResult, &hasType);
             const auto resultIndex = hasResult ? (hasType ? 2u : 1u) : 0u;
-            for (std::size_t index = 1; index < instruction.size(); ++index) if (index != resultIndex) referenced.insert(instruction[index]);
+            for (std::size_t index = 1; index < instruction.size(); ++index) if (index != resultIndex) copies.erase(instruction[index]);
         }
+        if (copies.empty()) return false;
+        const auto resolve = [&](std::uint32_t id) {
+            std::size_t count = 0;
+            while (copies.contains(id)) {
+                if (++count > copies.size()) throw std::runtime_error("cyclic prepared copy chain");
+                id = copies.at(id);
+            }
+            return id;
+        };
+        bool function = false;
         for (auto& instruction : instructions) {
-            if (Opcode(instruction) != spv::OpCompositeExtract || referenced.contains(Result(instruction))) continue;
-            removed.insert(Result(instruction));
-            instruction.clear();
+            if (instruction.empty()) continue;
+            const auto op = Opcode(instruction);
+            if (op == spv::OpFunction) function = true;
+            if (op == spv::OpFunctionEnd) function = false;
+            if (!function) continue;
+            if (op == spv::OpCopyObject && copies.contains(instruction[2])) {
+                removed.insert(instruction[2]);
+                instruction.clear();
+                continue;
+            }
+            VisitInputs(instruction, [&](std::size_t index) { instruction[index] = resolve(instruction[index]); });
+        }
+        return true;
+    }
+
+    void removeDeadComputations() {
+        std::map<std::uint32_t, std::size_t> definitions;
+        std::vector<std::uint32_t> pending;
+        bool function = false;
+        for (std::size_t index = 0; index < instructions.size(); ++index) {
+            const auto& instruction = instructions[index];
+            if (instruction.empty()) continue;
+            const auto op = Opcode(instruction);
+            if (op == spv::OpFunction) function = true;
+            if (op == spv::OpFunctionEnd) function = false;
+            if (!function) {
+                if (op == spv::OpDecorateId || op == spv::OpGroupDecorate || op == spv::OpGroupMemberDecorate) {
+                    for (std::size_t operand = 1; operand < instruction.size(); ++operand) pending.push_back(instruction[operand]);
+                }
+                continue;
+            }
+            if (PureInstruction(instruction)) {
+                definitions.emplace(Result(instruction), index);
+                continue;
+            }
+            if (VisitInputs(instruction, [&](std::size_t operand) { pending.push_back(instruction[operand]); })) continue;
+            bool hasResult = false;
+            bool hasType = false;
+            spv::HasResultAndType(op, &hasResult, &hasType);
+            const auto resultIndex = hasResult ? (hasType ? 2u : 1u) : 0u;
+            for (std::size_t operand = 1; operand < instruction.size(); ++operand) if (operand != resultIndex) pending.push_back(instruction[operand]);
+        }
+        std::set<std::uint32_t> live;
+        while (!pending.empty()) {
+            const auto id = pending.back();
+            pending.pop_back();
+            const auto found = definitions.find(id);
+            if (found == definitions.end() || !live.insert(id).second) continue;
+            const auto& instruction = instructions[found->second];
+            if (!VisitInputs(instruction, [&](std::size_t operand) { pending.push_back(instruction[operand]); })) throw std::runtime_error("missing prepared pure instruction operands");
+        }
+        for (const auto& [id, index] : definitions) {
+            if (live.contains(id)) continue;
+            removed.insert(id);
+            instructions[index].clear();
         }
     }
 

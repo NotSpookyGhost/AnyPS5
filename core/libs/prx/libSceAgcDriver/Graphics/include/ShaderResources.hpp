@@ -18,6 +18,8 @@
 #include <unordered_map>
 #include <vector>
 
+namespace AgcDriver { class VulkanDevice; }
+
 namespace AgcDriver::Graphics {
 
 class Recorder;
@@ -228,6 +230,8 @@ public:
     std::vector<std::pair<std::uint64_t, std::uint64_t>> PresyncSurfaces() const;
 
 private:
+    friend class AgcDriver::VulkanDevice;
+    bool refreshData(VkCommandBuffer commands, const CompiledShader& shader, Recorder* recorder);
     struct DescribedRange {
         const char* kind;
         std::uint64_t address;
