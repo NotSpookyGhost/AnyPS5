@@ -170,6 +170,9 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
     }
     decoded.conversionFormat = RemapTextureFormat(format) != format ? format : IrBufferFormat::Invalid;
     decoded.srgbDecode = !storage && (srgbDecodeFormats & SrgbDecodeBit(format)) != 0u;
+    if (decoded.srgbDecode && !base.srgbDecodeCompatible) {
+        throw std::runtime_error("samples or gathers an sRGB image the device cannot sample, which is not implemented");
+    }
     if (storage || decoded.conversionFormat != IrBufferFormat::Invalid) {
         decoded.shaderSwizzle = descriptorImageSwizzle(descriptor);
     }
@@ -192,6 +195,7 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
             decoded.numericClass = IrTextureNumericClass::Uint;
         }
         if ((rawSintStorage || (base.atomic && format == IrBufferFormat::Format32SInt)) && !base.packed) {
+            if (!base.depthBitsCompatible) throw std::runtime_error("stores 16-bit data to an image of a SINT format");
             decoded.conversionFormat = format;
         }
     } else if (decoded.numericClass == IrTextureNumericClass::Unsupported || (base.depthCompare && decoded.numericClass != IrTextureNumericClass::Float)) {
