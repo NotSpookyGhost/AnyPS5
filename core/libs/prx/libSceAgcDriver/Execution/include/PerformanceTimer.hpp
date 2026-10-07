@@ -5,17 +5,15 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstdio>
+#include <functional>
 #include <iomanip>
-#include <locale>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <sstream>
+#include <ostream>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
-#include "prx/libc/include/general/LogMacros.hpp"
 
 namespace AgcDriver {
 
@@ -107,39 +105,39 @@ public:
         gpuGapMs += gapMs;
     }
 
-    void Print(std::uint32_t outputHandle, std::int32_t buffer, std::int64_t argument, Clock::time_point finished, Clock::duration interval) {
+    std::function<void(std::ostream&)> Capture(std::uint32_t outputHandle, std::int32_t buffer, std::int64_t argument, Clock::time_point finished, Clock::duration interval) {
         std::lock_guard lock(mutex);
         if (firstSerial == 0 || flipSerial == 0) throw std::runtime_error("Frame timing: incomplete submission lineage");
-        std::ostringstream output;
-        output.imbue(std::locale::classic());
-        output << std::fixed << std::setprecision(3);
-        output << "[FrameTiming] frame=" << id << " submissions=" << firstSerial << ':' << lastSerial;
-        output << " output=" << outputHandle;
-        output << " flip=" << flipSerial << ':' << flipOffset << " buffer=" << buffer << " argument=" << argument;
-        output << " endpoint=flip_complete display_confirmed=0";
-        output << " first_submit_to_flip_ms=" << milliseconds(finished - start);
-        output << " flip_submit_to_complete_ms=" << milliseconds(finished - flipReceived);
-        output << " first_submit_to_execute_ms=" << milliseconds(executionStart - start);
-        output << " execute_to_flip_packet_ms=" << milliseconds(flipReached - executionStart);
-        output << " flip_packet_to_complete_ms=" << milliseconds(finished - flipReached);
-        auto accounted = Clock::duration::zero();
-        for (const auto scope : {"Driver.Packet", "Driver.Suspend", "Driver.Worker", "Driver.Completion"}) {
-            const auto it = metrics.find({scope, "total"});
-            if (it != metrics.end()) accounted += it->second.total;
-        }
-        output << " worker_unattributed_ms=" << milliseconds(flipReached - executionStart - accounted);
-        if (interval != Clock::duration::zero()) output << " flip_interval_ms=" << milliseconds(interval);
-        output << " batches_at_flip=" << batchesAtFlip << " unsignaled_at_flip=" << unsignaledAtFlip << " batches_at_blit=" << batchesAtBlit << " batches_after_flip=" << batchesAfterFlip;
-        output << " gpu_busy_ms=" << gpuBusyMs << " gpu_gap_ms=" << gpuGapMs;
-        output << " last_submit_after_flip_ms=" << milliseconds(lastSubmitAfterFlip) << " blit_submit_after_flip_ms=" << milliseconds(blitSubmitAfterFlip);
-        output << " metrics=inclusive(count,sum_ms,max_ms[,bytes])";
-        for (const auto& [key, metric] : metrics) {
-            if (metric.count == 0) continue;
-            output << ' ' << key.first << '.' << key.second << "=(" << metric.count << ',' << milliseconds(metric.total) << ',' << milliseconds(metric.maximum);
-            if (metric.bytes != 0) output << ',' << metric.bytes;
-            output << ')';
-        }
-        APS5_LOG_TIMING("%s", output.str().c_str());
+        return [metrics = metrics, id = id, firstSerial = firstSerial, lastSerial = lastSerial, flipSerial = flipSerial, flipOffset = flipOffset, start = start, executionStart = executionStart, flipReceived = flipReceived, flipReached = flipReached, batchesAtFlip = batchesAtFlip, unsignaledAtFlip = unsignaledAtFlip, batchesAtBlit = batchesAtBlit, batchesAfterFlip = batchesAfterFlip, gpuBusyMs = gpuBusyMs, gpuGapMs = gpuGapMs, lastSubmitAfterFlip = lastSubmitAfterFlip, blitSubmitAfterFlip = blitSubmitAfterFlip, outputHandle, buffer, argument, finished, interval](std::ostream& output) {
+            output << std::fixed << std::setprecision(3);
+            output << "[FrameTiming] frame=" << id << " submissions=" << firstSerial << ':' << lastSerial;
+            output << " output=" << outputHandle;
+            output << " flip=" << flipSerial << ':' << flipOffset << " buffer=" << buffer << " argument=" << argument;
+            output << " endpoint=flip_complete display_confirmed=0";
+            output << " first_submit_to_flip_ms=" << milliseconds(finished - start);
+            output << " flip_submit_to_complete_ms=" << milliseconds(finished - flipReceived);
+            output << " first_submit_to_execute_ms=" << milliseconds(executionStart - start);
+            output << " execute_to_flip_packet_ms=" << milliseconds(flipReached - executionStart);
+            output << " flip_packet_to_complete_ms=" << milliseconds(finished - flipReached);
+            auto accounted = Clock::duration::zero();
+            for (const auto scope : {"Driver.Packet", "Driver.Suspend", "Driver.Worker", "Driver.Completion"}) {
+                const auto it = metrics.find({scope, "total"});
+                if (it != metrics.end()) accounted += it->second.total;
+            }
+            output << " worker_unattributed_ms=" << milliseconds(flipReached - executionStart - accounted);
+            if (interval != Clock::duration::zero()) output << " flip_interval_ms=" << milliseconds(interval);
+            output << " batches_at_flip=" << batchesAtFlip << " unsignaled_at_flip=" << unsignaledAtFlip << " batches_at_blit=" << batchesAtBlit << " batches_after_flip=" << batchesAfterFlip;
+            output << " gpu_busy_ms=" << gpuBusyMs << " gpu_gap_ms=" << gpuGapMs;
+            output << " last_submit_after_flip_ms=" << milliseconds(lastSubmitAfterFlip) << " blit_submit_after_flip_ms=" << milliseconds(blitSubmitAfterFlip);
+            output << " metrics=inclusive(count,sum_ms,max_ms[,bytes])";
+            for (const auto& [key, metric] : metrics) {
+                if (metric.count == 0) continue;
+                output << ' ' << key.first << '.' << key.second << "=(" << metric.count << ',' << milliseconds(metric.total) << ',' << milliseconds(metric.maximum);
+                if (metric.bytes != 0) output << ',' << metric.bytes;
+                output << ')';
+            }
+            output << '\n';
+        };
     }
 
 private:

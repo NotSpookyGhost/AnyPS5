@@ -23,7 +23,7 @@ if(BUILD_TESTING)
 endif()
 
 option(ANYPS5_ENABLE_SPIRV_TOOLS "Enable SPIRV-Tools validation and optimization" OFF)
-option(APS5_ENABLE_TIMING_LOG "Enable frame timing logging" OFF)
+option(APS5_ENABLE_TIMING_LOG "Write frame timings asynchronously to frame-timing.log" OFF)
 add_compile_definitions(APS5_ENABLE_TIMING_LOG=$<BOOL:${APS5_ENABLE_TIMING_LOG}>)
 
 set(CMAKE_CXX_STANDARD 20)
