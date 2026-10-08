@@ -32,6 +32,7 @@ struct BufferResource {
 enum class ImageMipMode { None, DynamicStorage };
 
 namespace EmulatedCompare {
+inline constexpr std::uint32_t NativeOffsetUnsupported = 1u << 29u;
 inline constexpr std::uint32_t Unsupported = 1u << 31u;
 inline constexpr std::uint32_t RequiresSingleLevel = 1u << 30u;
 inline constexpr std::uint32_t Enabled = 1u << 0u;

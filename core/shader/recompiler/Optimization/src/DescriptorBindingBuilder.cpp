@@ -437,6 +437,12 @@ DescriptorBindingPlan DescriptorBindingBuilder::Select(const DescriptorBindingPl
         selected.bindings.push_back(binding);
     }
     if (!remaining.empty()) fail("specialized module bindings disagree with the prepared plan");
+    const bool hasSamplers = std::any_of(selected.bindings.begin(), selected.bindings.end(), [](const auto& binding) { return binding.descriptor.role == DescriptorRole::GuestSamplers; });
+    if (!hasSamplers) {
+        for (auto& binding : selected.bindings) {
+            std::fill(binding.descriptor.imageSamplers.begin(), binding.descriptor.imageSamplers.end(), 0u);
+        }
+    }
     selected.imageMetadata = plan.imageMetadata;
     return selected;
 }

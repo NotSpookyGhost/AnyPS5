@@ -311,7 +311,8 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     const auto inputInfo = RequestInputInfo(request);
     constexpr DeadCodeEliminator deadCodeEliminator;
     constexpr ResourceMaterializer resourceMaterializer;
-    resourceMaterializer.ApplyStaticInterface(program);
+    const bool nativeSampleOffsets = request.target.nonConstantImageOffsets && std::find(request.target.supportedCapabilities.begin(), request.target.supportedCapabilities.end(), spv::CapabilityImageGatherExtended) != request.target.supportedCapabilities.end();
+    resourceMaterializer.ApplyStaticInterface(program, nativeSampleOffsets);
 
     deadCodeEliminator.RemoveIdentities(program);
     deadCodeEliminator.Eliminate(program);

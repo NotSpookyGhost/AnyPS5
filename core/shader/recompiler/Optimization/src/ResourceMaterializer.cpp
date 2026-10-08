@@ -2,6 +2,7 @@
 #include "Optimization/SrtWalker/SrtFlatSlotClasses.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
 #include "RdnaDecoder/RdnaDescriptorFormat.hpp"
+#include "RdnaDecoder/RdnaImageOpDecoder.hpp"
 #include "SpirvBackend/SpirvBufferFormat.hpp"
 #include <algorithm>
 #include <array>
@@ -623,7 +624,7 @@ std::vector<ImageResource> ResourceMaterializer::RuntimeImageModes(const ImageRe
             if (supported) append(numeric, IrBufferFormat::Invalid, format, false, false);
         }
     } else {
-        append(IrTextureNumericClass::Float, IrBufferFormat::Invalid, IrBufferFormat::Invalid, false, false);
+        if ((image.emulatedCompare & EmulatedCompare::NativeOffsetUnsupported) == 0u) append(IrTextureNumericClass::Float, IrBufferFormat::Invalid, IrBufferFormat::Invalid, false, false);
         if (!image.depthCompare) {
             append(IrTextureNumericClass::Uint, IrBufferFormat::Invalid, IrBufferFormat::Invalid, false, false);
             if (!storage) append(IrTextureNumericClass::Sint, IrBufferFormat::Invalid, IrBufferFormat::Invalid, false, false);
@@ -677,6 +678,7 @@ std::uint32_t ResourceMaterializer::RuntimeImageMode(const ImageResource& image,
     const auto decoded = decodeImageDescriptor(descriptor, image, image.srgbDecodeFormats);
     const auto format = rawImageFormat(descriptor);
     const bool emulated = image.depthCompare && format != IrBufferFormat::Format32Float && format != IrBufferFormat::Format16UNorm && !IsDepthBitsTexture(descriptor.dwords[1], descriptor.dwords[3]);
+    if (!emulated && (image.emulatedCompare & EmulatedCompare::NativeOffsetUnsupported) != 0u) throw std::runtime_error("native comparison with a nonconstant texel offset requires VK_KHR_maintenance8 and shaderImageGatherExtended");
     if (image.packed && decoded.packedFormat != IrBufferFormat::Invalid) {
         const auto format = GetFormatInfo(decoded.packedFormat);
         if (format.packedBitfield) throw std::runtime_error("runtime packed image accesses a bitfield format");
@@ -706,10 +708,24 @@ std::uint32_t ResourceMaterializer::EmulatedCompareState(const ShaderInfo& info,
     return emulatedCompareState(info, snapshot, index);
 }
 
-void ResourceMaterializer::ApplyStaticInterface(IrProgram& program) const {
+void ResourceMaterializer::ApplyStaticInterface(IrProgram& program, bool nativeSampleOffsets) const {
     auto& resources = program.Resources();
     if (!resources.resourceTrackingComplete || !resources.srtPlanComplete) throw std::runtime_error("static resource interface requires a completed resource plan");
     auto images = resources.info.images;
+    if (!nativeSampleOffsets) {
+        for (const auto& block : program.Blocks()) {
+            for (const auto* inst : block->Instructions()) {
+                if (inst->Opcode() != IrOpcode::ImageSampleRaw) continue;
+                const auto& memory = resources.memoryInfo.at(inst->Flags<MemoryFlags>().index);
+                if ((memory.imageSampleFlags & (RdnaImageSampleFlagCompare | RdnaImageSampleFlagOffset)) != (RdnaImageSampleFlagCompare | RdnaImageSampleFlagOffset)) continue;
+                const auto* address = inst->Argument(2)->Resolve();
+                const auto component = GetRdnaImageAddressComponentLayout(memory.imageSampleFlags, 0u);
+                const auto argument = component.bitOffset / 32u;
+                if (component.bitWidth == 32u && argument < address->ArgumentCount() && address->Argument(argument)->Resolve()->HasImmediate()) continue;
+                images.at(memory.resource).emulatedCompare |= EmulatedCompare::NativeOffsetUnsupported;
+            }
+        }
+    }
     const auto directCount = static_cast<std::uint32_t>(images.size());
     auto mappingOffset = static_cast<std::uint32_t>(resources.srtReads.size());
     const auto slots = BindlessSlots();
