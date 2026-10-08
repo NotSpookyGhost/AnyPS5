@@ -892,10 +892,10 @@ void EmitReadOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {
 }
 
 std::uint32_t ImageSampleIndex(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {
-    const auto& dimension = RdnaImageDimensionInfoFor(access.image.dimension);
-    if (dimension.multisampled == 0u) return ConstantU32(ctx.state, 0u);
-    if (access.mem.imageAddressComponents <= dimension.coordinateComponents) ctx.Fail(access.inst, "has no sample index in the image address");
-    return AddressU32(ctx, access, dimension.coordinateComponents);
+    if (RdnaImageDimensionInfoFor(access.image.dimension).multisampled == 0u) return ConstantU32(ctx.state, 0u);
+    const auto& addressInfo = AddressDimension(access);
+    if (addressInfo.multisampled == 0u || access.mem.imageAddressComponents <= addressInfo.coordinateComponents) ctx.Fail(access.inst, "has no sample index in the image address");
+    return AddressU32(ctx, access, addressInfo.coordinateComponents);
 }
 
 void EmitWriteOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access) {

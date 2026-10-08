@@ -265,10 +265,11 @@ void Registration(bool indirect) {
 
 int main(int argc, char** argv) {
     try {
-        Require(argc == 1 || (argc == 2 && std::string_view(argv[1]) == "--indirect"), "invalid test arguments");
+        Require(argc == 1 || (argc == 2 && (std::string_view(argv[1]) == "--indirect" || std::string_view(argv[1]) == "--fail-before-registration")), "invalid test arguments");
         auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         Run(*device);
+        Require(argc != 2 || std::string_view(argv[1]) != "--fail-before-registration", "injected failure before registration");
         PrepareMultisampledStorage(*device);
         device.reset();
         Registration(argc == 2);
@@ -276,6 +277,11 @@ int main(int argc, char** argv) {
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
+        try {
+            AgcDriverShutdown_nid_postfix();
+        } catch (const std::exception& shutdownError) {
+            std::cerr << shutdownError.what() << '\n';
+        }
         return 1;
     }
 }
